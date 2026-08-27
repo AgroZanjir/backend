@@ -160,6 +160,10 @@ first.
 The backend serves the API and its own static files; the web client is a static
 bundle that any web server can host. Nothing here needs a container to run.
 
+The nginx config, the systemd unit and the two deployment scripts live in the
+[infra repository](https://github.com/AgroZanjir/infra); what follows is the
+sequence they automate.
+
 ```sh
 # 1. the API
 cp .env.example .env                      # then set the deployment block
@@ -173,12 +177,12 @@ cp .env.example .env                      # then set the deployment block
 .venv/bin/python manage.py seed_accounts  # prints the passwords once
 .venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3
 
-# 2. the web client
-cd ../web
-VITE_API_BASE_URL=https://api.agrozanjir.uz npm run build   # -> web/dist
+# 2. the web client, from the frontend repository
+git clone https://github.com/AgroZanjir/frontend.git && cd frontend
+VITE_API_BASE_URL=https://api.agrozanjir.uz npm run build   # -> dist/
 ```
 
-`web/dist` is served as static files, with **every unknown path rewritten to
+`dist/` is served as static files, with **every unknown path rewritten to
 `index.html`** - it is a single-page app, and a reader who reloads on
 `/showroom/melon` gets a 404 from the web server otherwise.
 
