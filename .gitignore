@@ -5,3 +5,15 @@ __pycache__/
 db.sqlite3
 media/
 staticfiles/
+
+# Editors and the operating system. These lived in the monorepo's root
+# .gitignore; this repository is its own root now.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
+
+# Written by `manage.py spectacular`, not committed - the web client
+# generates its API types from the live schema.
+schema.yml

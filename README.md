@@ -208,3 +208,13 @@ lot movement and SQLite locks the file for each one.
 - **Offline field capture.** The gate endpoint is idempotent, which is the half
   of it that belongs here; the PWA with its IndexedDB queue is not built.
 - **Row-level security.** Scoping is enforced in the application layer only.
+
+## The other two repositories
+
+This is one of three. They are deployed together and versioned apart:
+
+| Repository | What it is |
+| --- | --- |
+| [AgroZanjir/backend](https://github.com/AgroZanjir/backend) | Django 6 + DRF: the lot registry, the event log, the six clusters and the ports |
+| [AgroZanjir/frontend](https://github.com/AgroZanjir/frontend) | Vite + React: the public website and the eight operator panels |
+| [AgroZanjir/infra](https://github.com/AgroZanjir/infra) | How the two are served: nginx, gunicorn, PostgreSQL, the deployment sequence |
