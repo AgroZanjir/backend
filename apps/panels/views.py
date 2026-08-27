@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from django.db.models import Case, Count, IntegerField, Prefetch, Q, Value, When
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -86,10 +87,15 @@ def _lot_queryset():
 def visible_lots(user):
     """Every lot this person may see, and why they may see it.
 
-    Four routes, and the panels need all four: a producer owns the lot, a hub
-    is holding it, a bank has a lien over it, an insurer covers it. Ownership
-    alone would leave the hub's own storage screen empty, which is how this
-    rule was found.
+    Five routes, and the panels need all five: a producer owns the lot, a hub
+    has custody of it, a hub's room is holding it, a bank has a lien over it,
+    an insurer covers it.
+
+    Ownership alone left the hub's storage screen empty. Adding placement was
+    not enough either: a lot registered at the gate is in nobody's room until
+    somebody puts it away, so the gate, grading and put-away screens showed the
+    hub everything except the lots it had just taken in. Custody is what those
+    three screens actually work on.
     """
     queryset = _lot_queryset()
     if is_platform(user):
@@ -98,6 +104,7 @@ def visible_lots(user):
     party_ids = [m.party_id for m in memberships_of(user)]
     return queryset.filter(
         Q(owner_party_id__in=party_ids)
+        | Q(custody_party_id__in=party_ids)
         | Q(
             placements__removed_at__isnull=True,
             placements__zone__facility__operator_party_id__in=party_ids,
@@ -614,6 +621,125 @@ def notifications(request):
         Q(user=request.user) | Q(user__isnull=True)
     )[:50]
     return Response({"results": [build.notification_payload(n) for n in queryset]})
+
+
+@extend_schema(
+    summary="Mark a notification read",
+    description="Reading is per person: a platform-wide notice is marked read for whoever read it.",
+    request=None,
+    responses={200: dict},
+)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def read_notification(request, notification_id: str):
+    notification = get_object_or_404(
+        Notification.objects.filter(Q(user=request.user) | Q(user__isnull=True)),
+        pk=notification_id,
+    )
+    # A platform-wide notice has no user; marking it read gives it one rather
+    # than hiding it from everybody else.
+    if notification.user_id is None:
+        notification = Notification.objects.create(
+            user=request.user,
+            level=notification.level,
+            message_key=notification.message_key,
+            subject=notification.subject,
+            occurred_at=notification.occurred_at,
+            read_at=timezone.now(),
+        )
+    else:
+        notification.read_at = timezone.now()
+        notification.save(update_fields=["read_at", "updated_at"])
+
+    return Response(build.notification_payload(notification))
+
+
+@extend_schema(
+    summary="Search the platform",
+    description=(
+        "What the box in the top bar looks through: lots, organisations, "
+        "export contracts, shipments and excursions - scoped exactly as the "
+        "tables that list them are, so search cannot become a way around "
+        "`party_scope`."
+    ),
+    responses={200: dict},
+)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def search(request):
+    query = (request.query_params.get("q") or "").strip()
+    if len(query) < 2:
+        return Response({"query": query, "results": []})
+
+    results: list[dict] = []
+
+    for lot in visible_lots(request.user).filter(code__icontains=query)[:6]:
+        results.append(
+            {
+                "kind": "lot",
+                "code": lot.code,
+                "label": lot.code,
+                "detail": f"{lot.product.code} · {lot.status}",
+                "path": "/lot",
+            }
+        )
+
+    for contract in ExportContract.objects.filter(
+        Q(code__icontains=query) | Q(buyer_name__icontains=query)
+    ).select_related("product")[:4]:
+        results.append(
+            {
+                "kind": "export",
+                "code": contract.code,
+                "label": contract.code,
+                "detail": contract.buyer_name,
+                "path": "/export/contract",
+            }
+        )
+
+    for shipment in Shipment.objects.filter(
+        Q(code__icontains=query) | Q(vehicle__icontains=query)
+    )[:4]:
+        results.append(
+            {
+                "kind": "shipment",
+                "code": shipment.code,
+                "label": shipment.code,
+                "detail": shipment.route,
+                "path": "/export/shipment",
+            }
+        )
+
+    for excursion in ConditionExcursion.objects.filter(
+        Q(code__icontains=query) | Q(scope_code__icontains=query)
+    )[:4]:
+        results.append(
+            {
+                "kind": "excursion",
+                "code": excursion.code,
+                "label": excursion.code,
+                "detail": f"{excursion.scope_code} · {excursion.severity}",
+                "path": "/hub/excursion",
+            }
+        )
+
+    # Organisations are the administration panel's, and only a platform role
+    # may list them. Search must not become the way around that.
+    if is_platform(request.user):
+        for party in Party.objects.filter(
+            Q(code__icontains=query) | Q(legal_name__icontains=query)
+        ).select_related("type")[:5]:
+            results.append(
+                {
+                    "kind": "organisation",
+                    "code": party.code,
+                    "label": party.legal_name,
+                    "detail": f"{party.code} · {party.verification_status}",
+                    "path": "/admin/organisation",
+                }
+            )
+
+    return Response({"query": query, "results": results})
 
 
 # --- administration ---------------------------------------------------------

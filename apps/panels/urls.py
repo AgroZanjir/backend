@@ -33,6 +33,12 @@ urlpatterns = [
     path("shipments/<str:code>/", views.shipment, name="shipment"),
     path("documents/", views.documents, name="documents"),
     path("notifications/", views.notifications, name="notifications"),
+    path(
+        "notifications/<uuid:notification_id>/read/",
+        views.read_notification,
+        name="notification-read",
+    ),
+    path("search/", views.search, name="search"),
     path("admin/organisations/", views.organisations, name="organisations"),
     path("admin/organisations/<str:code>/", views.organisation, name="organisation"),
     path("admin/users/", views.platform_users, name="users"),

@@ -16,6 +16,10 @@ class PanelApiTests(TestCase):
     def setUpTestData(cls):
         call_command("seed_reference", verbosity=0)
         call_command("seed_demo", verbosity=0)
+        # The accounts too: the panels' access rules are about roles, and the
+        # roles only exist on somebody. One shared password, because these are
+        # signed in through the stub adapter by username anyway.
+        call_command("seed_accounts", password="test-only", verbosity=0)
 
     def sign_in(self, persona: str) -> dict:
         response = self.client.post(
@@ -102,7 +106,12 @@ class PanelApiTests(TestCase):
         response = self.get("/api/v1/panels/admin/organisations/", "m.tulyaganova")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.json()["results"]), 10)
+        codes = {row["code"] for row in response.json()["results"]}
+        # The pilot's ten, plus the five `seed_accounts` adds so that every
+        # kind of organisation has one to belong to.
+        self.assertIn("ORG-00412", codes)
+        self.assertIn("ORG-00001", codes)
+        self.assertGreaterEqual(len(codes), 10)
 
     def test_an_organisation_under_review_shows_which_checks_apply(self):
         body = self.get(
@@ -262,3 +271,66 @@ class PanelApiTests(TestCase):
         ).json()
         self.assertEqual(excursion["severity"], "critical")
         self.assertIn(open_claim["lot"], excursion["lots"])
+
+    def test_a_hub_sees_the_lot_it_just_registered(self):
+        """Custody, not placement.
+
+        A lot registered at the gate is in nobody's room until somebody puts it
+        away. Keying visibility on placement alone showed the hub everything
+        except its own intake - which is exactly what the gate, grading and
+        put-away screens work on.
+        """
+        created = self.client.post(
+            "/api/v1/lots/",
+            {
+                "product": "melon",
+                "farm": "F-SMQ-014",
+                "net_weight_g": 3_000_000,
+                "idempotency_key": "custody-1",
+            },
+            content_type="application/json",
+            headers=self.sign_in("g.rasulova"),
+        )
+        self.assertEqual(created.status_code, 201, created.content[:200])
+        code = created.json()["code"]
+
+        # The farm owns it, and the farm is not the hub.
+        self.assertEqual(Lot.objects.get(code=code).owner_party.code, "ORG-00412")
+
+        visible = {row["code"] for row in self.get("/api/v1/panels/lots/").json()["results"]}
+        self.assertIn(code, visible)
+
+    def test_custody_ends_when_the_lot_leaves(self):
+        headers = self.sign_in("d.yusupov")
+        self.client.post(
+            "/api/v1/lots/AZ-2026-SMQ-0377/dispatch/",
+            content_type="application/json",
+            headers=headers,
+        )
+        lot = Lot.objects.get(code="AZ-2026-SMQ-0377")
+
+        self.assertEqual(lot.status, "dispatched")
+        # Custody passes to whoever is carrying it, and the platform does not
+        # know that yet: better empty than wrong.
+        self.assertIsNone(lot.custody_party)
+
+    def test_the_administration_panel_opens_for_the_roles_built_for_it(self):
+        """Not `administer` alone.
+
+        A verification officer holds `verify` and an auditor holds `audit`.
+        Demanding `administer` locked both out of the panel they exist to
+        work in - and the screens then crashed on the empty collections.
+        """
+        for persona in ("az.verify", "az.audit", "az.admin", "az.owner"):
+            with self.subTest(persona=persona):
+                response = self.get("/api/v1/panels/admin/organisations/", persona)
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json()["results"])
+
+    def test_it_stays_shut_to_everyone_else(self):
+        for persona in ("d.yusupov", "a.bekmurodov", "n.sharipov"):
+            with self.subTest(persona=persona):
+                self.assertEqual(
+                    self.get("/api/v1/panels/admin/organisations/", persona).status_code,
+                    403,
+                )

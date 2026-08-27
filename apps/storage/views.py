@@ -26,7 +26,9 @@ from rest_framework.response import Response
 from apps.common.api import audit, requires
 from apps.lots.models import Lot
 from apps.panels.serializers import arrival_payload, excursion_payload, lot_payload, zone_payload
+from apps.registry.models import Farm, Product
 from apps.storage.models import (
+    Facility,
     ConditionExcursion,
     ConditionReading,
     GateArrival,
@@ -87,7 +89,11 @@ def place(request):
     # the lot actually went - which is here.
     lot.storage_mode = zone.mode
     lot.sell_by = _sell_by(lot, zone)
-    lot.save(update_fields=["storage_mode", "sell_by", "updated_at"])
+    # Custody follows the goods: whoever operates the room is holding it now.
+    lot.custody_party = zone.facility.operator_party
+    lot.save(
+        update_fields=["storage_mode", "sell_by", "custody_party", "updated_at"]
+    )
     if lot.can_transition_to(Lot.Status.STORED):
         lot.transition(Lot.Status.STORED)
 
@@ -154,6 +160,45 @@ def remove(request):
     )
     return Response({"lot": lot_payload(lot)})
 
+
+
+class ArrivalSerializer(serializers.Serializer):
+    facility = serializers.CharField()
+    farm = serializers.CharField(required=False, allow_blank=True)
+    product = serializers.SlugField()
+    vehicle = serializers.CharField(required=False, allow_blank=True)
+    expected_at = serializers.DateTimeField()
+    estimated_weight_g = serializers.IntegerField(min_value=0, default=0)
+
+
+@extend_schema(
+    summary="Announce a delivery to the gate",
+    description=(
+        "What a producer sends ahead and what the gate screen queues. It is "
+        "not a lot yet: a lot is born on the weighbridge, from a weight "
+        "somebody stood next to."
+    ),
+    request=ArrivalSerializer,
+    responses={201: dict},
+)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, requires("capture")])
+def announce_arrival(request):
+    payload = ArrivalSerializer(data=request.data)
+    payload.is_valid(raise_exception=True)
+    data = payload.validated_data
+
+    arrival = GateArrival.objects.create(
+        facility=Facility.objects.get(code=data["facility"]),
+        farm=Farm.objects.filter(code=data.get("farm") or "").first(),
+        product=Product.objects.get(code=data["product"]),
+        vehicle=data.get("vehicle", ""),
+        expected_at=data["expected_at"],
+        estimated_weight_g=data["estimated_weight_g"],
+        status=GateArrival.Status.QUEUED,
+    )
+    audit(request, "a_created", object_ref=arrival.vehicle or str(arrival.id), capability="capture")
+    return Response(arrival_payload(arrival), status=status.HTTP_201_CREATED)
 
 
 class WeighSerializer(serializers.Serializer):

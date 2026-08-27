@@ -197,6 +197,9 @@ def application_payload(application) -> dict:
 
 def lien_payload(lien) -> dict:
     return {
+        # The lien's own id: a release addresses the lien, not the lot, and a
+        # lot can have carried more than one over its life.
+        "id": str(lien.id),
         "lot": lien.lot.code,
         "application": lien.application.code,
         "holder": lien.holder_party.legal_name,

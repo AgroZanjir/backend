@@ -102,6 +102,15 @@ class Lot(BaseModel):
     owner_party = models.ForeignKey(
         "registry.Party", on_delete=models.PROTECT, related_name="lots"
     )
+    # Who is holding it, which is not who owns it. A farmer owns a consignment
+    # from harvest to settlement; the hub has custody of it from the gate until
+    # it leaves. Without this the hub cannot see a lot it registered itself
+    # until somebody puts it on a shelf - the gate, grading and put-away
+    # screens all work on lots that are in custody and not yet placed.
+    custody_party = models.ForeignKey(
+        "registry.Party", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="lots_in_custody",
+    )
     # Integer grams. Boxes, crates and pallets are presentation (rule 4).
     net_weight_g = models.BigIntegerField()
     gross_weight_g = models.BigIntegerField(null=True, blank=True)

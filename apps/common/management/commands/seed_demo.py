@@ -357,6 +357,15 @@ class Command(BaseCommand):
         self._governance(parties, users)
         self._verification(parties, users)
 
+        if options["reset"]:
+            self.stdout.write(
+                self.style.WARNING(
+                    "The organisations were rebuilt, so memberships went with "
+                    "them. Run `manage.py seed_accounts` to link the same "
+                    "people to them again - their passwords are untouched."
+                )
+            )
+
         self.stdout.write(
             self.style.SUCCESS(
                 f"Demo data: {Party.objects.count()} organisations, "
@@ -369,12 +378,23 @@ class Command(BaseCommand):
     # -- helpers ---------------------------------------------------------
 
     def _reset(self):
+        """Empty the demo tables. People are not one of them.
+
+        This used to delete every non-superuser as well, which quietly
+        invalidated every password `seed_accounts` had issued - the accounts
+        came back on the next run with new ones, and the list somebody had
+        written down stopped working. The dataset and the people are separate
+        commands; a reset of one must not silently rebuild the other.
+
+        Memberships go, because the organisations they point at do. Run
+        `seed_accounts` afterwards to link the same people to the rebuilt
+        organisations; it will not touch their passwords.
+        """
         for model in DEMO_MODELS:
             # LotEvent refuses `delete()` on the instance, which is the point;
             # a queryset delete is the operator's reset, and it exists only
             # because a demo database is meant to be rebuilt.
             model.objects.all().delete()
-        User.objects.filter(is_superuser=False).delete()
 
     def _products(self) -> dict:
         rows = {}
@@ -418,27 +438,37 @@ class Command(BaseCommand):
         rows = {}
         for username, name, org, role, oneid, eimzo, last, status in USERS:
             first, _, rest = name.partition(" ")
-            user = User.objects.create(
+            # `update_or_create`, because a reset keeps people: the dataset is
+            # rebuilt around them and their passwords are not touched. Creating
+            # blindly here collided with the accounts `seed_accounts` issued.
+            user, created = User.objects.update_or_create(
                 username=username,
-                display_name=name,
-                first_name=first,
-                last_name=rest,
-                email=f"{username}@example.uz",
-                status=status,
-                oneid_verified=oneid,
-                eimzo_verified=eimzo,
-                last_seen_at=at(last) if last else None,
-                is_active=status != "suspended",
+                defaults={
+                    "display_name": name,
+                    "first_name": first,
+                    "last_name": rest,
+                    "email": f"{username}@example.uz",
+                    "status": status,
+                    "oneid_verified": oneid,
+                    "eimzo_verified": eimzo,
+                    "last_seen_at": at(last) if last else None,
+                    "is_active": status != "suspended",
+                },
             )
-            # Nobody signs in with a password here: OneID is the way in, and an
-            # unusable password is the honest state for these accounts.
-            user.set_unusable_password()
-            user.save(update_fields=["password"])
-            Membership.objects.create(
+            if created:
+                # OneID is the way in for these; an unusable password is the
+                # honest state for an account nobody has been given.
+                user.set_unusable_password()
+                user.save(update_fields=["password"])
+            Membership.objects.get_or_create(
                 user=user,
                 party=parties[org],
                 role=roles[role],
-                facility_codes=["HUB-SMQ"] if roles[role].scope == "facility" else [],
+                defaults={
+                    "facility_codes": (
+                        ["HUB-SMQ"] if roles[role].scope == "facility" else []
+                    )
+                },
             )
             rows[username] = user
         return rows
@@ -499,6 +529,11 @@ class Command(BaseCommand):
             harvested, placed, sell_by, arm, valuation,
         ) in LOTS:
             farm_row = farms[farm]
+            # Anything at the hub - on a shelf or waiting to be put away - is
+            # in the hub operator's custody. Anything dispatched or settled has
+            # left, and custody with it.
+            in_custody = status not in {"dispatched", "settled", "written_off"}
+
             lot = Lot.objects.create(
                 code=code,
                 product=products[product],
@@ -513,6 +548,7 @@ class Command(BaseCommand):
                 sell_by=date.fromisoformat(sell_by) if sell_by else None,
                 trial_arm=arm,
                 valuation_minor=valuation * TIYIN,
+                custody_party=parties["ORG-00008"] if in_custody else None,
             )
             rows[code] = lot
 

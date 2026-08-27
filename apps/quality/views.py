@@ -85,14 +85,31 @@ def create_qc_record(request):
 
 
 class ObservationSerializer(serializers.Serializer):
+    """What a tablet sends from a cold store.
+
+    Every measurement but the day is optional *and nullable*: a cleared field
+    serialises to null, and refusing that turned a partly-taken observation
+    into an error instead of a partly-taken observation.
+    """
+
     arm = serializers.ChoiceField(choices=TrialArm.Kind.choices)
     day_index = serializers.IntegerField(min_value=0)
     observed_on = serializers.DateField()
-    weight_loss_pct = serializers.DecimalField(max_digits=6, decimal_places=2, required=False)
-    waste_pct = serializers.DecimalField(max_digits=6, decimal_places=2, required=False)
-    firmness_n = serializers.DecimalField(max_digits=6, decimal_places=2, required=False)
-    colour_score = serializers.DecimalField(max_digits=4, decimal_places=1, required=False)
-    markdown_pct = serializers.DecimalField(max_digits=6, decimal_places=2, required=False)
+    weight_loss_pct = serializers.DecimalField(
+        max_digits=6, decimal_places=2, required=False, allow_null=True
+    )
+    waste_pct = serializers.DecimalField(
+        max_digits=6, decimal_places=2, required=False, allow_null=True
+    )
+    firmness_n = serializers.DecimalField(
+        max_digits=6, decimal_places=2, required=False, allow_null=True
+    )
+    colour_score = serializers.DecimalField(
+        max_digits=4, decimal_places=1, required=False, allow_null=True
+    )
+    markdown_pct = serializers.DecimalField(
+        max_digits=6, decimal_places=2, required=False, allow_null=True
+    )
     note = serializers.CharField(required=False, allow_blank=True)
 
 

@@ -16,5 +16,5 @@ urlpatterns = [
     path("organisations/mine/", views.my_organisations, name="my-orgs"),
     path("organisations/<str:code>/checks/", views.decide_check, name="decide-check"),
     path("users/invite/", views.invite, name="invite"),
-    path("users/<uuid:user_id>/status/", views.set_user_status, name="user-status"),
+    path("users/<int:user_id>/status/", views.set_user_status, name="user-status"),
 ]

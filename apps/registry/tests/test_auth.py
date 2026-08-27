@@ -1,5 +1,6 @@
 """Sessions: OneID at the front, JWT behind it, refresh in an httpOnly cookie."""
 
+from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 
@@ -86,3 +87,53 @@ class AuthTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["user"]["username"], "d.yusupov")
+
+
+class UserStatusTests(TestCase):
+    """Suspending an account, through the route the panel actually calls."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_reference", verbosity=0)
+        party = Party.objects.create(
+            code="ORG-9",
+            legal_name="Platform",
+            type=OrganisationType.objects.get(code="operator"),
+            verification_status="verified",
+        )
+        cls.admin = User.objects.create(
+            username="admin.one", display_name="A", status="active"
+        )
+        Membership.objects.create(
+            user=cls.admin, party=party, role=Role.objects.get(code="platform_admin")
+        )
+        cls.victim = User.objects.create(
+            username="someone", display_name="S", status="active"
+        )
+        Membership.objects.create(
+            user=cls.victim, party=party, role=Role.objects.get(code="org_member")
+        )
+
+    def test_the_route_matches_an_integer_key(self):
+        """`User` subclasses `AbstractUser`, whose primary key is an integer.
+
+        The route declared a uuid converter, so every call 404'd - the panel's
+        suspend button looked wired and was not.
+        """
+        access = self.client.post(
+            reverse("registry:oneid"),
+            {"persona": "admin.one"},
+            content_type="application/json",
+        ).json()["access"]
+
+        response = self.client.post(
+            reverse("registry:user-status", args=[self.victim.pk]),
+            {"status": "suspended"},
+            content_type="application/json",
+            headers={"authorization": f"Bearer {access}"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.content[:200])
+        self.victim.refresh_from_db()
+        self.assertEqual(self.victim.status, "suspended")
+        self.assertFalse(self.victim.is_active)

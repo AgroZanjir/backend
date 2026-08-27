@@ -79,11 +79,17 @@ def register(request):
         or request.user.memberships.first().party
     )
 
+    # The farm owns it; whoever is standing at the gate has custody of it.
+    # Those are different questions and the hub needs the second one answered
+    # to see its own intake before anything is on a shelf.
+    membership = request.user.memberships.select_related("party").first()
+
     lot = Lot.objects.create(
         code=data.get("code") or _next_lot_code(),
         product=Product.objects.get(code=data["product"]),
         origin_farm=farm,
         owner_party=owner,
+        custody_party=membership.party if membership else None,
         net_weight_g=data["net_weight_g"],
         gross_weight_g=data.get("gross_weight_g"),
         harvested_on=data.get("harvested_on"),
@@ -175,6 +181,7 @@ def split(request, code: str):
             product=parent.product,
             origin_farm=parent.origin_farm,
             owner_party=parent.owner_party,
+            custody_party=parent.custody_party,
             net_weight_g=quantity,
             grade=spec.get("grade", ""),
             status=Lot.Status.GRADED,
@@ -252,6 +259,11 @@ def dispatch(request, code: str):
         lot.transition(Lot.Status.DISPATCHED)
     except ValidationError as exc:
         return Response({"detail": exc.messages}, status=status.HTTP_409_CONFLICT)
+
+    # It has left. Custody passes to whoever is carrying it, and the platform
+    # does not know that yet - better empty than wrong.
+    lot.custody_party = None
+    lot.save(update_fields=["custody_party", "updated_at"])
 
     lot.log(
         "dispatched",

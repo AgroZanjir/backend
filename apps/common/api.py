@@ -91,10 +91,23 @@ def requires(code: str) -> type[HasCapability]:
     )
 
 
-class IsPlatformAdministrator(permissions.BasePermission):
-    """The administration panel: `administer`, and only from a platform role."""
+#: The three capabilities the administration panel exists to exercise.
+#: `administer` runs it, `verify` admits organisations to it, `audit` reads
+#: what everyone did in it. All three are platform-scope work.
+PLATFORM_CAPABILITIES = ("administer", "verify", "audit")
 
-    message = "Only platform administrators may use this endpoint."
+
+class IsPlatformAdministrator(permissions.BasePermission):
+    """The administration panel, and only from a platform role.
+
+    It used to demand `administer` alone, which locked out the two roles the
+    panel was built for: a verification officer holds `verify` and an auditor
+    holds `audit`, and neither could load the organisations they are there to
+    decide on or read. The panel's own screens then crashed on the empty
+    collections, which is how this was found.
+    """
+
+    message = "Only the platform's own staff may use this endpoint."
 
     def has_permission(self, request, view) -> bool:
         user = request.user
@@ -103,7 +116,8 @@ class IsPlatformAdministrator(permissions.BasePermission):
         if user.is_superuser:
             return True
         return any(
-            m.role.scope == "platform" and m.has_capability("administer")
+            m.role.scope == "platform"
+            and any(m.has_capability(c) for c in PLATFORM_CAPABILITIES)
             for m in memberships_of(user)
         )
 
