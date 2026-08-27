@@ -70,6 +70,9 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # Serves the admin's own static files with far-future caching, so a
+    # deployment needs a web server in front for TLS and nothing else.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -132,6 +135,12 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    },
+}
 
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
@@ -160,6 +169,11 @@ SPECTACULAR_SETTINGS = {
 }
 
 CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
+# Django checks the Origin header on unsafe requests; a deployment behind TLS
+# on another host is refused without this even when CORS allows it.
+CSRF_TRUSTED_ORIGINS = env(
+    "CSRF_TRUSTED_ORIGINS", default=CORS_ALLOWED_ORIGINS
+)
 # The refresh token travels as a cookie, so the browser must be allowed to send
 # it: `fetch(..., {credentials: "include"})` is refused without this.
 CORS_ALLOW_CREDENTIALS = True
@@ -182,7 +196,12 @@ SIMPLE_JWT = {
 REFRESH_COOKIE = {
     "name": "az_refresh",
     "path": "/api/v1/auth/",
-    "samesite": "Lax",
+    # `Lax` is right while the web client and the API share a registrable
+    # domain (agrozanjir.uz and api.agrozanjir.uz do). On genuinely different
+    # domains the browser will not send a Lax cookie with an XHR at all, and
+    # this has to become `None` - which browsers only accept together with
+    # Secure, so both move at once.
+    "samesite": env("REFRESH_COOKIE_SAMESITE", default="Lax"),
     # Set SESSION_COOKIE_SECURE-style behaviour from the environment: over
     # plain http in development the browser drops a Secure cookie silently.
     "secure": env.bool("REFRESH_COOKIE_SECURE", default=not DEBUG),
@@ -209,3 +228,23 @@ PORT_ADAPTERS = {
     "customs": env("CUSTOMS_ADAPTER", default="manual"),
     "sensor": env("SENSOR_ADAPTER", default="manual"),
 }
+
+
+# --- production ---------------------------------------------------------------
+
+# Off in development, because a Secure cookie over plain http is dropped
+# silently and an HSTS header on localhost outlives the project. Everything
+# here is what a deployment behind TLS needs and nothing more.
+if not DEBUG:
+    SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=31536000)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = "same-origin"
+    # Behind nginx or a load balancer, Django only learns the request was
+    # HTTPS from this header - without it every redirect loops.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    X_FRAME_OPTIONS = "DENY"

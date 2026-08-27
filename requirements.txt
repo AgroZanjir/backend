@@ -8,3 +8,5 @@ django-cors-headers==4.9.0
 django-environ==0.14.0
 drf-spectacular==0.30.0                # the OpenAPI spec the web client generates from
 psycopg[binary]==3.3.4                 # PostgreSQL 16 driver
+whitenoise==6.11.0                     # static files without a second web server
+gunicorn==23.0.0                       # the WSGI server a deployment runs

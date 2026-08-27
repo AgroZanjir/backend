@@ -11,8 +11,14 @@ cp .env.example .env            # optional; the shell boots without one
 .venv/bin/python manage.py migrate
 .venv/bin/python manage.py seed_reference     # capabilities, roles, org types, checks
 .venv/bin/python manage.py seed_demo          # the pilot demonstration dataset
+.venv/bin/python manage.py seed_accounts      # the people, and their passwords
 .venv/bin/python manage.py runserver 8000
 ```
+
+`seed_accounts` creates the pilot's people - three to six roles at each kind of
+organisation - and prints their passwords once. It is idempotent and never
+deletes anything; `--rotate` issues new passwords, `--password X` sets one
+shared password for a demonstration on a laptop.
 
 `seed_reference` is not demo data — it is the product's own catalogues (ten
 capabilities, thirty-seven roles, thirteen organisation types, six verification
@@ -27,7 +33,7 @@ panels were designed against; `--reset` replaces it.
 | `/admin/` | the operator admin, which is also the manual-adapter surface |
 
 ```sh
-.venv/bin/python manage.py test          # 48 tests
+.venv/bin/python manage.py test          # 51 tests
 .venv/bin/python manage.py spectacular --file schema.yml   # dump the spec
 ```
 
@@ -82,6 +88,7 @@ and it is the only module allowed to import across them.
 | Path | What it does |
 | --- | --- |
 | `POST /api/v1/auth/oneid/` | sign in (OneID; `stub` adapter until it is connected) |
+| `POST /api/v1/auth/password/` | sign in with a username and password |
 | `POST /api/v1/auth/refresh/` | exchange the httpOnly cookie for an access token |
 | `POST /api/v1/auth/logout/`, `GET /auth/me/`, `GET /auth/personas/` | the rest of the session |
 | `POST /api/v1/lots/` | register at the gate (idempotent) |
@@ -114,8 +121,11 @@ is a finding in any bank's security review, and this platform faces banks.
 `ONEID_ADAPTER=stub` resolves a seeded persona instead of a state identity and
 returns `adapter: "stub"` in the session, which the sign-in screen prints. The
 live adapter replaces one function in `apps/registry/auth.py`; no caller
-changes. `POST /auth/password/` stays as the way in when OneID is down, which
-it will be.
+changes. `POST /auth/password/` is the other door, and not a lesser one: it is how a
+pilot runs before OneID is connected at all, and how the platform stays usable
+when the state identity provider is down - which it will be. Those accounts are
+created by `manage.py seed_accounts`, and the platform stores a hash, never the
+password.
 
 ## Ports
 
@@ -144,6 +154,51 @@ lots in Python rather than with a `JSONField__contains` lookup, and
 `ConditionReading` carries a plain integer key — it will outnumber every other
 table a thousand to one and is the one to partition (or move to TimescaleDB)
 first.
+
+## Deployment
+
+The backend serves the API and its own static files; the web client is a static
+bundle that any web server can host. Nothing here needs a container to run.
+
+```sh
+# 1. the API
+cp .env.example .env                      # then set the deployment block
+#    DEBUG=False, a real DJANGO_SECRET_KEY, ALLOWED_HOSTS, DATABASE_URL,
+#    CORS_ALLOWED_ORIGINS and CSRF_TRUSTED_ORIGINS
+.venv/bin/python manage.py check --deploy # must be clean before anything else
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py collectstatic --noinput
+.venv/bin/python manage.py seed_reference
+.venv/bin/python manage.py seed_demo      # pilot dataset; skip for a real one
+.venv/bin/python manage.py seed_accounts  # prints the passwords once
+.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3
+
+# 2. the web client
+cd ../web
+VITE_API_BASE_URL=https://api.agrozanjir.uz npm run build   # -> web/dist
+```
+
+`web/dist` is served as static files, with **every unknown path rewritten to
+`index.html`** - it is a single-page app, and a reader who reloads on
+`/showroom/melon` gets a 404 from the web server otherwise.
+
+Four things that are easy to get wrong, and what each looks like when it is:
+
+| Setting | Wrong looks like |
+| --- | --- |
+| `VITE_API_BASE_URL` | Vite inlines it at **build** time; changing the API's address means building again |
+| `CORS_ALLOWED_ORIGINS` | every request fails in the browser and succeeds in `curl` |
+| `CSRF_TRUSTED_ORIGINS` | reads work, writes come back 403 |
+| `REFRESH_COOKIE_SAMESITE` | signing in works, reloading the page signs you out - the cookie is `Lax` and the two hosts are not the same site |
+
+With `DEBUG=False` the security settings switch on by themselves: TLS redirect,
+HSTS, secure cookies, `X-Frame-Options: DENY`, and the proxy header Django
+needs to know a request arrived over HTTPS. `manage.py check --deploy` is the
+gate - it must report no issues.
+
+**PostgreSQL, not SQLite.** Set `DATABASE_URL`. The fallback exists so the
+shell boots before a database is provisioned; two tables are written on every
+lot movement and SQLite locks the file for each one.
 
 ## Not built yet
 
