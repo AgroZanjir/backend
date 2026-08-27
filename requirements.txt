@@ -1,0 +1,10 @@
+# Agro Zanjir Digital - backend
+# Pinned to what the shell was verified against; bump deliberately.
+
+Django==6.1
+djangorestframework==3.18.0
+djangorestframework-simplejwt==5.5.1   # section 05: a library, not hand-rolled auth
+django-cors-headers==4.9.0
+django-environ==0.14.0
+drf-spectacular==0.30.0                # the OpenAPI spec the web client generates from
+psycopg[binary]==3.3.4                 # PostgreSQL 16 driver
