@@ -58,6 +58,7 @@ LOCAL_APPS = [
     "apps.documents",    # document vault
     "apps.governance",   # audit log, data-sharing grants
     "apps.panels",       # the cross-cluster read composition the panels are served by
+    "apps.assistant",    # no tables: the public website's assistant
 ]
 
 # Identity is OneID's; this row is the local shadow of a person. Declared now
@@ -158,6 +159,18 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
     "PAGE_SIZE": 50,
+    # Only the assistant is throttled, and only because it is the one endpoint
+    # that is open to the public *and* costs money per request. The counters
+    # live in the cache; see apps/assistant/throttles.py for what that means
+    # when a deployment runs more than one worker.
+    "DEFAULT_THROTTLE_RATES": {
+        "assistant-burst": env("ASSISTANT_BURST_RATE", default="6/min"),
+        "assistant-hour": env("ASSISTANT_HOUR_RATE", default="40/hour"),
+        # The panels' assistant is behind a session, so it is keyed on the
+        # person rather than the address and can be far looser: somebody who
+        # signed in is somebody an operator issued an account to.
+        "assistant-panel": env("ASSISTANT_PANEL_RATE", default="120/hour"),
+    },
 }
 
 SPECTACULAR_SETTINGS = {
@@ -215,6 +228,37 @@ REFRESH_COOKIE = {
 # sign-in screen shows that banner. Nothing else in the system knows which
 # adapter answered.
 ONEID_ADAPTER = env("ONEID_ADAPTER", default="stub")
+
+# --- the website's assistant ------------------------------------------------
+
+# The public website's assistant. A port in every sense except that it does not
+# live in `ports/`: those five are the value chain's external relationships, and
+# this is the website's.
+#
+# `auto` means "on if a key is configured"; `off` switches it off with the key
+# still in place. Either way the widget asks `GET /api/v1/assistant/` first and
+# prints what it is told, so a deployment without a key shows a line saying so
+# rather than a chat box that fails on the first question.
+ASSISTANT_ADAPTER = env("ASSISTANT_ADAPTER", default="auto")  # auto | off
+ASSISTANT_API_KEY = env("ANTHROPIC_API_KEY", default="")
+ASSISTANT_MODEL = env("ASSISTANT_MODEL", default="claude-opus-5")
+# Adaptive thinking is on by default on this model and is deliberately left on:
+# with it disabled the model occasionally writes a tool call into its visible
+# text instead of calling the tool, which here would read as the assistant
+# describing a lot lookup it never made. Effort is what tunes the cost instead.
+ASSISTANT_EFFORT = env("ASSISTANT_EFFORT", default="low")  # low .. max
+# The panels' assistant thinks harder than the website's, because it is asked
+# harder things: "which of mine are pledged and go off this month" is three
+# reads and an aggregation, where "what is Agro Zanjir" is neither.
+ASSISTANT_PANEL_EFFORT = env("ASSISTANT_PANEL_EFFORT", default="medium")
+# The ceiling for one turn, thinking included. A chat panel's answer is three
+# short paragraphs; this is headroom, not a target.
+ASSISTANT_MAX_TOKENS = env.int("ASSISTANT_MAX_TOKENS", default=4096)
+# Server-side refusal fallbacks, so a declined question is answered by another
+# model inside the same call instead of leaving a visitor with a dead panel.
+# The process switches this off by itself if the account does not carry the
+# beta; set it False to stop asking at all.
+ASSISTANT_FALLBACKS = env.bool("ASSISTANT_FALLBACKS", default=True)
 
 # --- ports (section 04) -----------------------------------------------------
 

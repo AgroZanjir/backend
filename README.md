@@ -31,9 +31,10 @@ panels were designed against; `--reset` replaces it.
 | `/api/docs/` | Swagger UI over the generated OpenAPI schema |
 | `/api/schema/` | the schema itself — the web client generates its API layer from this |
 | `/admin/` | the operator admin, which is also the manual-adapter surface |
+| `/api/v1/assistant/` | whether the website's assistant is connected (open, no auth) |
 
 ```sh
-.venv/bin/python manage.py test          # 51 tests
+.venv/bin/python manage.py test          # 87 tests
 .venv/bin/python manage.py spectacular --file schema.yml   # dump the spec
 ```
 
@@ -56,6 +57,7 @@ apps/finance/     FINANCE    — FinanceApplication, Encumbrance, Policy, Claim,
 apps/documents/   the document vault — Document
 apps/governance/  AuditEntry, DataGrant
 apps/panels/      no tables: the cross-cluster read composition the panels need
+apps/assistant/   no tables: the two assistants, public and operator
 ports/            LenderPort, InsurerPort, CarrierPort, CustomsPort, SensorPort
 ```
 
@@ -99,8 +101,20 @@ and it is the only module allowed to import across them.
 | `POST /api/v1/commercial/shipments/`, `/{code}/depart/`, `/exports/{code}/declaration/` | logistics and the border |
 | `POST /api/v1/finance/applications/`, `/liens/`, `/claims/` (+ decisions) | money and risk |
 | `POST /api/v1/documents/` | the vault |
+| `POST /api/v1/storage/arrivals/` | a producer announces a delivery to the gate |
+| `POST /api/v1/governance/grants/`, `/{id}/revoke/` | data-sharing consent |
+| `GET  /api/v1/panels/search/` | what the box in the top bar looks through |
+| `POST /api/v1/panels/notifications/{id}/read/` | the bell |
 | `GET  /api/v1/panels/…` | everything the eight panels read |
 | `GET  /api/v1/panels/public/lots/{code}/`, `/public/trials/{code}/` | open by design |
+| `GET  /api/v1/assistant/`, `POST /assistant/ask/` | the website's assistant; also open |
+| `POST /api/v1/assistant/panel/ask/` | the panels' assistant; session + `view`, and scoped |
+
+**A lot is owned by one party and held by another.** `Lot.custody_party` is
+who has it - the hub from the gate until it leaves - and `owner_party` is who
+owns it throughout. Visibility needs both: keying on placement alone showed a
+hub everything except the lots it had just taken in, which is exactly what its
+gate, grading and put-away screens work on.
 
 **Permissions are capability-based.** A view names the capability it needs —
 `requires("capture")` — and never a role, so adding the thirty-eighth role
@@ -126,6 +140,83 @@ pilot runs before OneID is connected at all, and how the platform stays usable
 when the state identity provider is down - which it will be. Those accounts are
 created by `manage.py seed_accounts`, and the platform stores a hash, never the
 password.
+
+## The assistants
+
+`apps/assistant` has no tables and serves two of them. They share the loop, the
+stream and the seven rules in `brief.RULES`; they differ in who is asking, and
+everything else follows from that.
+
+### On the public website
+
+Open to anybody. It can reach exactly two things: a brief describing the
+programme - written down in `brief.py`, so what the product says about itself
+is reviewable rather than buried in a log - and two tools that call
+`/panels/public/lots/{code}/` and `/panels/public/trials/{code}/`. Those
+endpoints are already open. The ceiling on what it can say about a lot is
+therefore the same function that answers an anonymous browser: no owner, no
+price, no lender, no lien. That is asserted in the tests, not promised in a
+prompt.
+
+### In the panels
+
+`POST /assistant/panel/ask/`, behind a session and the `view` capability. Its
+brief carries who is asking - their organisations, roles and capabilities, read
+from the registry - and its four tools are scoped to them by the **same**
+helpers the panel views use: `visible_lots`, `party_ids_of`, `is_platform`. One
+place to get scoping right, not two.
+
+| Tool | Reads | Scoped by |
+| --- | --- | --- |
+| `find_lots` | one row per lot, with filters for status, produce, zone, lien and sell-by | `visible_lots` |
+| `lot_passport` | the full passport for one lot | `visible_lots`, **and audited** |
+| `find_zones` | capacity, fill, conditions, set points | facilities the caller's parties operate |
+| `find_liens` | the lien register | liens over lots in `visible_lots` |
+
+Three things worth knowing about it:
+
+**A passport read is written to the audit log**, with the operator as actor and
+`assistant: true` in the context, so an auditor can tell a read made through a
+screen from one made through a question. A survey of forty lots is not audited
+as forty passport reads - that would make the log unreadable, which is the same
+as not having one.
+
+**Where a panel screen is looser than the assistant, the assistant wins.** The
+lien register view returns every lien to any authenticated caller; `find_liens`
+returns liens over lots the caller can already see. Narrower than the screen is
+a defect worth having. Wider is a breach.
+
+**It reads and never writes.** There is no tool that grades a lot, places a
+pallet, registers a lien or files a claim, and the brief tells it to name the
+screen that does instead.
+
+### Switching them on
+
+```sh
+ANTHROPIC_API_KEY=sk-ant-...   # the only setting either of them needs
+ASSISTANT_ADAPTER=off          # or switch both off with the key still in place
+```
+
+With no key, `GET /api/v1/assistant/` reports `available: false` with the
+reason, and both widgets print one line saying the assistant is not connected.
+That is the rule the OneID stub follows: a demonstration must never be able to
+pass for the real thing.
+
+Nothing is stored either side. A transcript is held by the browser, sent up
+with each question because the Messages API is stateless, and written down
+nowhere.
+
+Both stream server-sent events - `delta`, `tool`, `done`, `blocked`, `error`.
+An error carries a **code**, never a sentence: the product is read in three
+languages and the wording belongs to the client, exactly as it does for lot
+events.
+
+Two things a deployment has to get right:
+
+| Setting | Wrong looks like |
+| --- | --- |
+| `CACHES` | the rate limits are per gunicorn worker - three workers, three times the limit. Point `CACHES` at Redis or Memcached and they become one limit |
+| proxy buffering | nginx buffers a proxied response by default and holds every token back until the answer is finished. The views send `X-Accel-Buffering: no`; a proxy that is not nginx needs its own equivalent |
 
 ## Ports
 
@@ -212,6 +303,9 @@ lot movement and SQLite locks the file for each one.
 - **Offline field capture.** The gate endpoint is idempotent, which is the half
   of it that belongs here; the PWA with its IndexedDB queue is not built.
 - **Row-level security.** Scoping is enforced in the application layer only.
+- **An assistant without a key.** `apps/assistant` is complete and tested, but
+  a deployment that sets no `ANTHROPIC_API_KEY` runs the website and the panels
+  without it, and says so on the page.
 
 ## The other two repositories
 

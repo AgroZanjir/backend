@@ -23,7 +23,11 @@ api_v1 = [
     path("commercial/", include("apps.commercial.urls")),
     path("finance/", include("apps.finance.urls")),
     path("documents/", include("apps.documents.urls")),
+    path("governance/", include("apps.governance.urls")),
     path("panels/", include("apps.panels.urls")),
+    # Not a cluster and not one of the five ports: the public website's
+    # assistant, which reads the two open endpoints above and nothing else.
+    path("assistant/", include("apps.assistant.urls")),
 ]
 
 urlpatterns = [
