@@ -395,6 +395,10 @@ def platform_user_payload(user) -> dict:
 
 def audit_payload(entry) -> dict:
     return {
+        # The row's own id. The log records several actions in the same second
+        # on the same object - a read and the write it led to - so a timestamp
+        # is not an identity, and the screens list these.
+        "id": str(entry.id),
         "occurred_at": entry.occurred_at,
         "who": entry.actor_label
         or (entry.actor_user.display_name if entry.actor_user else ""),
