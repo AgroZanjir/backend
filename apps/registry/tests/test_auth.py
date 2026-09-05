@@ -137,3 +137,123 @@ class UserStatusTests(TestCase):
         self.victim.refresh_from_db()
         self.assertEqual(self.victim.status, "suspended")
         self.assertFalse(self.victim.is_active)
+
+
+class UserRoleTests(TestCase):
+    """Changing what a person is, through the route the panel calls."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_reference", verbosity=0)
+        cls.operator = Party.objects.create(
+            code="ORG-9",
+            legal_name="Platform",
+            type=OrganisationType.objects.get(code="operator"),
+            verification_status="verified",
+        )
+        cls.farm = Party.objects.create(
+            code="ORG-8",
+            legal_name="Farm",
+            type=OrganisationType.objects.get(code="farmer"),
+            verification_status="verified",
+        )
+        cls.admin = User.objects.create(
+            username="admin.two", display_name="A", status="active"
+        )
+        Membership.objects.create(
+            user=cls.admin,
+            party=cls.operator,
+            role=Role.objects.get(code="platform_admin"),
+        )
+        cls.hand = User.objects.create(
+            username="hand", display_name="H", status="active"
+        )
+        cls.membership = Membership.objects.create(
+            user=cls.hand, party=cls.farm, role=Role.objects.get(code="org_member")
+        )
+
+    def change(self, role):
+        access = self.client.post(
+            reverse("registry:oneid"),
+            {"persona": "admin.two"},
+            content_type="application/json",
+        ).json()["access"]
+        return self.client.post(
+            reverse("registry:user-role", args=[self.hand.pk]),
+            {"role": role},
+            content_type="application/json",
+            headers={"authorization": f"Bearer {access}"},
+        )
+
+    def test_the_membership_moves_to_the_new_role(self):
+        response = self.change("farm_manager")
+
+        self.assertEqual(response.status_code, 200, response.content[:200])
+        self.membership.refresh_from_db()
+        self.assertEqual(self.membership.role.code, "farm_manager")
+        self.assertEqual(response.json()["role"], "farm_manager")
+
+    def test_a_platform_role_is_refused_outside_the_operator(self):
+        """Otherwise the scope column on the role screen is a decoration."""
+        response = self.change("platform_owner")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("platform-wide role", response.json()["blockers"][0])
+        self.membership.refresh_from_db()
+        self.assertEqual(self.membership.role.code, "org_member")
+
+    def test_an_unknown_role_is_refused(self):
+        response = self.change("emperor")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_moving_to_a_role_they_already_hold_leaves_one_membership(self):
+        """(user, party, role) is unique - the edit would collide with it."""
+        Membership.objects.create(
+            user=self.hand, party=self.farm, role=Role.objects.get(code="farm_manager")
+        )
+
+        response = self.change("farm_manager")
+
+        self.assertEqual(response.status_code, 200, response.content[:200])
+        self.assertEqual(self.hand.memberships.count(), 1)
+        self.assertEqual(self.hand.memberships.get().role.code, "farm_manager")
+
+    def test_an_administrator_cannot_change_their_own_role(self):
+        """The session doing it is the one that would end."""
+        access = self.client.post(
+            reverse("registry:oneid"),
+            {"persona": "admin.two"},
+            content_type="application/json",
+        ).json()["access"]
+
+        response = self.client.post(
+            reverse("registry:user-role", args=[self.admin.pk]),
+            {"role": "org_member"},
+            content_type="application/json",
+            headers={"authorization": f"Bearer {access}"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("another administrator", response.json()["blockers"][0])
+        self.assertEqual(
+            self.admin.memberships.get().role.code, "platform_admin"
+        )
+
+    def test_an_administrator_cannot_suspend_themselves(self):
+        access = self.client.post(
+            reverse("registry:oneid"),
+            {"persona": "admin.two"},
+            content_type="application/json",
+        ).json()["access"]
+
+        response = self.client.post(
+            reverse("registry:user-status", args=[self.admin.pk]),
+            {"status": "suspended"},
+            content_type="application/json",
+            headers={"authorization": f"Bearer {access}"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.status, "active")

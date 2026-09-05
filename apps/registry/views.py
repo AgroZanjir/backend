@@ -173,12 +173,121 @@ class MembershipStatusSerializer(serializers.Serializer):
 @permission_classes([IsPlatformAdministrator])
 def set_user_status(request, user_id: str):
     user = User.objects.get(pk=user_id)
+    refusal = _not_yourself(request, user)
+    if refusal is not None:
+        return refusal
+
     payload = MembershipStatusSerializer(data=request.data)
     payload.is_valid(raise_exception=True)
 
     user.status = payload.validated_data["status"]
     user.is_active = user.status != User.Status.SUSPENDED
     user.save(update_fields=["status", "is_active"])
+
+    audit(request, "a_role", object_ref=user.display_name, capability="administer")
+    return Response(platform_user_payload(user))
+
+
+def _not_yourself(request, user) -> Response | None:
+    """Refuse an administrator acting on their own account.
+
+    Suspending yourself, or moving yourself off the role that let you in,
+    ends the session that is doing it - and the way back is a database
+    shell. Someone else with the capability can always do it instead.
+    """
+    if user.pk == request.user.pk:
+        return Response(
+            {
+                "detail": "This is your own account.",
+                # `blockers` reach the panel's toast verbatim, so they are
+                # sentences rather than codes - see dispatch_blockers().
+                "blockers": [
+                    "Ask another administrator to do this to your own account."
+                ],
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
+class MembershipRoleSerializer(serializers.Serializer):
+    role = serializers.SlugField(max_length=48)
+
+
+@extend_schema(
+    summary="Change what a person is at their organisation",
+    description=(
+        "Moves the person's membership to another role. The membership is the "
+        "thing that changes, not the account: their history keeps its actor "
+        "and their old decisions keep the role they were made under."
+    ),
+    request=MembershipRoleSerializer,
+    responses={200: dict},
+)
+@api_view(["POST"])
+@permission_classes([IsPlatformAdministrator])
+@transaction.atomic
+def set_user_role(request, user_id: str):
+    user = User.objects.get(pk=user_id)
+    refusal = _not_yourself(request, user)
+    if refusal is not None:
+        return refusal
+
+    payload = MembershipRoleSerializer(data=request.data)
+    payload.is_valid(raise_exception=True)
+
+    role = Role.objects.filter(code=payload.validated_data["role"]).first()
+    if role is None:
+        return Response(
+            {"detail": "No such role.", "blockers": ["There is no role with that code."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    membership = user.memberships.order_by("-is_primary").first()
+    if membership is None:
+        return Response(
+            {
+                "detail": "This person belongs to no organisation yet.",
+                "blockers": [
+                    "This person belongs to no organisation yet, so there is no"
+                    " role to change. Invite them into one first."
+                ],
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # A platform-scope role is power over everyone's data, so it can only be
+    # held at the organisation that runs the platform. Without this an
+    # administrator could hand `platform_owner` to a gate operator at a farm
+    # and the scope column on the role screen would be a decoration.
+    if (
+        role.scope == Role.Scope.PLATFORM
+        and membership.party.type.code != "operator"
+    ):
+        return Response(
+            {
+                "detail": "A platform role can only be held at the operator.",
+                "blockers": [
+                    "A platform-wide role can only be held at the organisation"
+                    " that runs the platform."
+                ],
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if membership.role_id != role.pk:
+        # (user, party, role) is unique, so if they already hold the target
+        # role at this organisation the change is the removal of the old row
+        # rather than an edit that would collide with it.
+        existing = user.memberships.filter(party=membership.party, role=role).first()
+        if existing is not None:
+            membership.delete()
+            membership = existing
+            membership.is_primary = True
+            membership.save(update_fields=["is_primary"])
+        else:
+            membership.role = role
+            membership.save(update_fields=["role", "updated_at"])
 
     audit(request, "a_role", object_ref=user.display_name, capability="administer")
     return Response(platform_user_payload(user))

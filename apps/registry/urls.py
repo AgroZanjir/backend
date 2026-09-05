@@ -17,4 +17,5 @@ urlpatterns = [
     path("organisations/<str:code>/checks/", views.decide_check, name="decide-check"),
     path("users/invite/", views.invite, name="invite"),
     path("users/<int:user_id>/status/", views.set_user_status, name="user-status"),
+    path("users/<int:user_id>/role/", views.set_user_role, name="user-role"),
 ]
