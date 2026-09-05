@@ -59,6 +59,7 @@ LOCAL_APPS = [
     "apps.governance",   # audit log, data-sharing grants
     "apps.panels",       # the cross-cluster read composition the panels are served by
     "apps.assistant",    # no tables: the public website's assistant
+    "apps.website",      # the one table a public visitor can write to
 ]
 
 # Identity is OneID's; this row is the local shadow of a person. Declared now
@@ -170,6 +171,10 @@ REST_FRAMEWORK = {
         # person rather than the address and can be far looser: somebody who
         # signed in is somebody an operator issued an account to.
         "assistant-panel": env("ASSISTANT_PANEL_RATE", default="120/hour"),
+        # The contact form. Nothing here costs money to answer, but it is the
+        # one table a stranger can put rows in, so it is bounded the same way.
+        "enquiry-burst": env("ENQUIRY_BURST_RATE", default="3/min"),
+        "enquiry-day": env("ENQUIRY_DAY_RATE", default="20/day"),
     },
 }
 

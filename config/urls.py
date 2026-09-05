@@ -28,6 +28,8 @@ api_v1 = [
     # Not a cluster and not one of the five ports: the public website's
     # assistant, which reads the two open endpoints above and nothing else.
     path("assistant/", include("apps.assistant.urls")),
+    # Nor is the contact form: the website's one write, open to anybody.
+    path("", include("apps.website.urls")),
 ]
 
 urlpatterns = [
