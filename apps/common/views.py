@@ -29,3 +29,29 @@ def health(request):
             "engine": connection.vendor,
         }
     )
+
+
+@extend_schema(
+    summary="Where the entry points are",
+    responses={200: dict},
+)
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def index(request):
+    """A signpost at the root of the API host.
+
+    Nothing is served here - the website is a separate origin, and this
+    process only answers under /api/v1/. Without this an operator who opens
+    the API host in a browser gets Django's 404, which reads as a broken
+    deployment when the deployment is fine. So say what is here instead.
+    """
+    return Response(
+        {
+            "service": "agro-zanjir-digital",
+            "api": request.build_absolute_uri("/api/v1/"),
+            "health": request.build_absolute_uri("/api/v1/health/"),
+            "docs": request.build_absolute_uri("/api/docs/"),
+            "schema": request.build_absolute_uri("/api/schema/"),
+            "admin": request.build_absolute_uri("/admin/"),
+        }
+    )

@@ -8,7 +8,7 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
 )
 
-from apps.common.views import health
+from apps.common.views import health, index
 
 api_v1 = [
     path("health/", health, name="health"),
@@ -31,6 +31,9 @@ api_v1 = [
 ]
 
 urlpatterns = [
+    # The website is a separate origin; this is only a signpost for whoever
+    # opens the API host itself.
+    path("", index, name="index"),
     # The admin is the manual adapter surface from figure 4 - it is a
     # deliverable here, not a developer convenience.
     path("admin/", admin.site.urls),
