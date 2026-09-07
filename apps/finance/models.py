@@ -22,6 +22,7 @@ imports this module; it simply asks every registered guard whether a lot may
 leave.
 """
 
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
@@ -50,6 +51,21 @@ class FinanceApplication(MoneyModel, BaseModel):
         REPAID = "repaid", "Repaid"
         REJECTED = "rejected", "Rejected"
 
+    #: Which statuses may follow which, as the lot has. An application only
+    #: moves forwards: a decision that was wrong is a new application, not a
+    #: rewritten one, because a lien and a disbursement were hung on the old
+    #: answer. `review` is optional - a small application can be approved
+    #: straight off the queue, and the lender is the one who says which.
+    TRANSITIONS: dict[str, tuple[str, ...]] = {
+        Status.DRAFT: (Status.SUBMITTED,),
+        Status.SUBMITTED: (Status.REVIEW, Status.APPROVED, Status.REJECTED),
+        Status.REVIEW: (Status.APPROVED, Status.REJECTED),
+        Status.APPROVED: (Status.DISBURSED,),
+        Status.DISBURSED: (Status.REPAID,),
+        Status.REPAID: (),
+        Status.REJECTED: (),
+    }
+
     code = models.CharField(max_length=32, unique=True)
     applicant_party = models.ForeignKey(
         "registry.Party", on_delete=models.PROTECT, related_name="finance_applications"
@@ -74,6 +90,30 @@ class FinanceApplication(MoneyModel, BaseModel):
 
     def __str__(self) -> str:
         return self.code
+
+    # -- transitions ------------------------------------------------------
+
+    def can_transition_to(self, status: str) -> bool:
+        return status in self.TRANSITIONS.get(self.status, ())
+
+    def transition(self, status: str, *, force: bool = False) -> None:
+        """Move the application, refusing anything the lifecycle disallows.
+
+        `force` is for the admin, which is the manual-adapter surface: the
+        reason it exists is to correct a state the product cannot reach, and
+        a bank that settles by telephone will need it.
+        """
+        if not force and not self.can_transition_to(status):
+            raise ValidationError(
+                f"{self.code}: {self.status} -> {status} is not a permitted "
+                "transition"
+            )
+        self.status = status
+        # The day the answer was given. A disbursement is not a decision, so
+        # it does not overwrite the day the decision was made.
+        if status in {self.Status.APPROVED, self.Status.REJECTED}:
+            self.decided_on = timezone.localdate()
+        self.save(update_fields=["status", "decided_on", "updated_at"])
 
     @property
     def collateral_value_minor(self) -> int:

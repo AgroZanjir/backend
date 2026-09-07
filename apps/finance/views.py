@@ -15,6 +15,7 @@ an outage.
 from __future__ import annotations
 
 from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
@@ -23,7 +24,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.common.api import audit, requires
+from apps.common.api import audit, is_platform, party_ids_of, requires
 from apps.finance.models import Claim, Encumbrance, FinanceApplication, Policy
 from apps.lots.models import Lot
 from apps.panels.serializers import application_payload, claim_payload, lien_payload
@@ -120,9 +121,56 @@ def submit_application(request, code: str):
 
 
 class DecisionSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=FinanceApplication.Status.choices)
+    # Only the two answers a decision has. The endpoint used to accept all
+    # seven statuses, which made it a way to write `repaid` onto a draft.
+    status = serializers.ChoiceField(
+        choices=[
+            (FinanceApplication.Status.APPROVED, "Approved"),
+            (FinanceApplication.Status.REJECTED, "Rejected"),
+        ]
+    )
     note = serializers.CharField(required=False, allow_blank=True)
     ltv_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+
+
+def _lender_side(request, application: FinanceApplication) -> Response | None:
+    """Refuse anyone but the lender moving a lender's application.
+
+    `decide` says the role may make credit decisions; it does not say whose.
+    Without this an approver at one bank could settle another bank's file,
+    which the capability model was never claiming to prevent on its own.
+    """
+    if is_platform(request.user):
+        return None
+    if application.lender_party_id in party_ids_of(request.user):
+        return None
+    return Response(
+        {
+            "detail": "This application is not lent by your organisation.",
+            "blockers": [
+                "This application belongs to another lender. Only "
+                f"{application.lender_party.legal_name} can move it."
+            ],
+        },
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def _move(request, code: str, to: str, *, action_key: str, capability: str):
+    """One step of the lifecycle, refused with 409 if it is not a legal one."""
+    application = FinanceApplication.objects.select_for_update().get(code=code)
+    refusal = _lender_side(request, application)
+    if refusal is not None:
+        return application, refusal
+    try:
+        application.transition(to)
+    except ValidationError as exc:
+        return application, Response(
+            {"detail": exc.messages, "blockers": exc.messages},
+            status=status.HTTP_409_CONFLICT,
+        )
+    audit(request, action_key, object_ref=application.code, capability=capability)
+    return application, None
 
 
 @extend_schema(
@@ -136,20 +184,112 @@ class DecisionSerializer(serializers.Serializer):
 @permission_classes([IsAuthenticated, requires("decide")])
 @transaction.atomic
 def decide_application(request, code: str):
-    application = FinanceApplication.objects.select_for_update().get(code=code)
     payload = DecisionSerializer(data=request.data)
     payload.is_valid(raise_exception=True)
 
-    application.status = payload.validated_data["status"]
-    application.decided_on = timezone.localdate()
+    application, refusal = _move(
+        request,
+        code,
+        payload.validated_data["status"],
+        action_key="a_decided",
+        capability="decide",
+    )
+    if refusal is not None:
+        return refusal
+
+    fields = []
     if payload.validated_data.get("ltv_pct") is not None:
         application.ltv_pct = payload.validated_data["ltv_pct"]
+        fields.append("ltv_pct")
     if payload.validated_data.get("note"):
         application.note = payload.validated_data["note"]
-    application.save()
+        fields.append("note")
+    if fields:
+        application.save(update_fields=[*fields, "updated_at"])
 
-    audit(request, "a_decided", object_ref=application.code, capability="decide")
     return Response(application_payload(application))
+
+
+@extend_schema(
+    summary="Take a submitted application into review",
+    description=(
+        "The step between arriving and being answered. It is the lender "
+        "saying the file is theirs and being looked at - which is what the "
+        "applicant is waiting to be told - and it is the officer's, not the "
+        "approver's, which is why it needs `transact` rather than `decide`."
+    ),
+    request=None, responses={200: dict})
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, requires("transact")])
+@transaction.atomic
+def review_application(request, code: str):
+    _, refusal = _move(
+        request,
+        code,
+        FinanceApplication.Status.REVIEW,
+        action_key="a_reviewing",
+        capability="transact",
+    )
+    if refusal is not None:
+        return refusal
+    return Response(
+        application_payload(FinanceApplication.objects.get(code=code))
+    )
+
+
+@extend_schema(
+    summary="Record that an approved application was paid out",
+    description=(
+        "Approving is not disbursing: the bank's own systems move the money "
+        "and this records that they did. Separate from the decision on "
+        "purpose - the approver commits the bank, the officer settles the "
+        "paperwork - and separate from the lien, which is registered against "
+        "each lot in its own step."
+    ),
+    request=None, responses={200: dict})
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, requires("transact")])
+@transaction.atomic
+def disburse_application(request, code: str):
+    _, refusal = _move(
+        request,
+        code,
+        FinanceApplication.Status.DISBURSED,
+        action_key="a_disbursed",
+        capability="transact",
+    )
+    if refusal is not None:
+        return refusal
+    return Response(
+        application_payload(FinanceApplication.objects.get(code=code))
+    )
+
+
+@extend_schema(
+    summary="Record that a disbursed application was repaid",
+    description=(
+        "The end of the file. Note what it does not do: the liens over the "
+        "lots are released one at a time, through the release endpoint, "
+        "because each release writes an event on its own lot and a lot may "
+        "secure more than one facility."
+    ),
+    request=None, responses={200: dict})
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, requires("transact")])
+@transaction.atomic
+def repay_application(request, code: str):
+    _, refusal = _move(
+        request,
+        code,
+        FinanceApplication.Status.REPAID,
+        action_key="a_repaid",
+        capability="transact",
+    )
+    if refusal is not None:
+        return refusal
+    return Response(
+        application_payload(FinanceApplication.objects.get(code=code))
+    )
 
 
 
