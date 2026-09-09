@@ -23,6 +23,8 @@ from typing import Any
 
 from django.http import Http404
 
+from apps.assistant.operator_tools import _rendered
+
 # The tool definitions, in a fixed order. `strict` guarantees the input
 # validates exactly, which is what lets `run` index the dict without guarding
 # every key. The order is fixed because the tool list is part of the cached
@@ -130,7 +132,10 @@ def run(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return {"error": "not_found", "detail": "No record carries that code."}
 
     try:
-        return runner(code)
+        # The same rendering the operator tools use: the public passport
+        # carries weights in grams, and a visitor asked about a melon should
+        # not be shown the model's arithmetic on 4200000.
+        return _rendered(runner(code))
     except Http404:
         return {
             "error": "not_found",

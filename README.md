@@ -171,7 +171,17 @@ place to get scoping right, not two.
 | `find_lots` | one row per lot, with filters for status, produce, zone, lien and sell-by | `visible_lots` |
 | `lot_passport` | the full passport for one lot | `visible_lots`, **and audited** |
 | `find_zones` | capacity, fill, conditions, set points | facilities the caller's parties operate |
+| `find_arrivals` | the gate queue | the yard you run, or the produce you sent |
+| `find_excursions` | conditions out of band, and the evidence behind a write-off | your zone, or a lot you can see was in it |
+| `find_qc` | quality checks, measurements, grades, lab documents | lots in `visible_lots` |
+| `find_trials` | the ZEROCO trials, observed points and projection | **nothing - they are public** |
 | `find_liens` | the lien register | liens over lots in `visible_lots` |
+| `find_applications` | finance applications | applicant or lender party |
+| `find_policies` | cover | insurer or holder party |
+| `find_claims` | losses claimed | policy parties, or the lot |
+| `find_shipments` | what is moving, and where to | carrier, seller, or a lot on board |
+| `find_exports` | what was sold, to whom | seller party |
+| `find_organisations` | the register | **platform roles only** - a refusal otherwise |
 
 Three things worth knowing about it:
 
@@ -189,6 +199,25 @@ a defect worth having. Wider is a breach.
 **It reads and never writes.** There is no tool that grades a lot, places a
 pallet, registers a lien or files a claim, and the brief tells it to name the
 screen that does instead.
+
+**One tool per question, and never a neighbouring one.** This is the rule the
+brief spends the most words on, because breaking it is how the assistant
+produced its only wrong answers. Given no tool for the gate queue it answered
+from the lot table; given none for transit it said "nothing is in transit"
+having looked at lot statuses while two shipments sat in the shipment table. A
+missing tool does not read as missing - it reads as an answer. The fourteen
+tools above exist so that the honest "I cannot see that" is needed rarely, and
+the brief names those three failures so the model recognises the shape.
+
+**Quantities are rendered in Python, not in the model's head.** Every tool
+result runs through `_rendered`, which puts `valuation: "168000000.00 UZS"`
+beside `valuation_minor: 16800000000` and `net_weight: "4200.0 kg"` beside
+`net_weight_g`. The raw fields stay - rules 4 and 5 are the truth. This exists
+because the model was doing the arithmetic itself and mostly getting it right:
+asked in Russian what an insurer covered, it reported a lot valued at
+168,000,000 UZS as 16,800,000, beside three figures it had divided correctly.
+A money field whose currency cannot be found is left unrendered rather than
+given a guessed one; this project spans UZS, USD and JPY.
 
 ### Switching them on
 
