@@ -21,9 +21,15 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.common.api import IsPlatformAdministrator, audit
+from apps.common.api import (
+    IsPlatformAdministrator,
+    audit,
+    memberships_of,
+    requires,
+)
 from apps.panels.serializers import organisation_payload, platform_user_payload
 from apps.registry.models import (
+    Farm,
     Membership,
     Party,
     PartyVerification,
@@ -291,6 +297,84 @@ def set_user_role(request, user_id: str):
 
     audit(request, "a_role", object_ref=user.display_name, capability="administer")
     return Response(platform_user_payload(user))
+
+
+class FarmSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=160)
+    region = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    district = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    hectares = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, min_value=0
+    )
+    owner_name = serializers.CharField(max_length=160, required=False, allow_blank=True)
+
+
+@extend_schema(
+    summary="Register a production site",
+    description=(
+        "A farm belongs to the caller's own organisation and to no other. "
+        "The party is taken from the session rather than the request for "
+        "that reason: a field is registered by whoever farms it."
+    ),
+    request=FarmSerializer,
+    responses={201: dict},
+)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, requires("capture")])
+@transaction.atomic
+def create_farm(request):
+    payload = FarmSerializer(data=request.data)
+    payload.is_valid(raise_exception=True)
+    data = payload.validated_data
+
+    membership = next(
+        (m for m in memberships_of(request.user) if m.is_primary),
+        next(iter(memberships_of(request.user)), None),
+    )
+    if membership is None:
+        return Response(
+            {
+                "detail": "You belong to no organisation.",
+                "blockers": ["A farm belongs to an organisation, and you are in none."],
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    farm = Farm.objects.create(
+        code=_next_farm_code(membership.party),
+        party=membership.party,
+        name=data["name"],
+        owner_name=data.get("owner_name", ""),
+        region=data.get("region", ""),
+        district=data.get("district", ""),
+        hectares=data.get("hectares") or 0,
+    )
+    audit(request, "a_created", object_ref=farm.code, capability="capture")
+    return Response(
+        {"code": farm.code, "name": farm.name},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+def _next_farm_code(party: Party) -> str:
+    """`F-SMQ-032`. The region stem is the operator's own convention."""
+    stem = (
+        Farm.objects.filter(party=party)
+        .values_list("code", flat=True)
+        .first()
+    )
+    prefix = stem.rsplit("-", 1)[0] if stem and "-" in stem else "F-NEW"
+    last = (
+        Farm.objects.filter(code__startswith=f"{prefix}-")
+        .order_by("-code")
+        .values_list("code", flat=True)
+        .first()
+    )
+    try:
+        nth = int(last.rsplit("-", 1)[1]) + 1
+    except (AttributeError, ValueError):
+        nth = 1
+    return f"{prefix}-{nth:03d}"
 
 
 @extend_schema(summary="Whoever the caller is, as the panels need them", responses={200: dict})

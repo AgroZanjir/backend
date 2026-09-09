@@ -4,7 +4,15 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 
-from apps.registry.models import Capability, Membership, OrganisationType, Party, Role, User
+from apps.registry.models import (
+    Capability,
+    Farm,
+    Membership,
+    OrganisationType,
+    Party,
+    Role,
+    User,
+)
 
 
 class AuthTests(TestCase):
@@ -257,3 +265,65 @@ class UserRoleTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.admin.refresh_from_db()
         self.assertEqual(self.admin.status, "active")
+
+
+class FarmTests(TestCase):
+    """Registering a production site, which the panel's button had no route for."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_reference", verbosity=0)
+        cls.party = Party.objects.create(
+            code="ORG-7",
+            legal_name="Nodir dehqon xo'jaligi",
+            type=OrganisationType.objects.get(code="farmer"),
+            verification_status="verified",
+        )
+        cls.farmer = User.objects.create(
+            username="n.sharipov", display_name="N. Sharipov", status="active"
+        )
+        Membership.objects.create(
+            user=cls.farmer,
+            party=cls.party,
+            role=Role.objects.get(code="farm_manager"),
+        )
+
+    def create(self, **body):
+        access = self.client.post(
+            reverse("registry:oneid"),
+            {"persona": "n.sharipov"},
+            content_type="application/json",
+        ).json()["access"]
+        return self.client.post(
+            reverse("registry:farm-create"),
+            {"name": "Yangi dala", "region": "Samarqand", "hectares": "12.5", **body},
+            content_type="application/json",
+            headers={"authorization": f"Bearer {access}"},
+        )
+
+    def test_a_farm_belongs_to_the_caller_s_organisation(self):
+        """The party comes from the session: a field is registered by whoever
+        farms it, and the request does not get to name somebody else."""
+        response = self.create()
+
+        self.assertEqual(response.status_code, 201, response.content[:200])
+        farm = Farm.objects.get()
+        self.assertEqual(farm.party, self.party)
+        self.assertEqual(farm.name, "Yangi dala")
+        self.assertEqual(str(farm.hectares), "12.50")
+
+    def test_the_code_follows_the_ones_already_there(self):
+        Farm.objects.create(code="F-SMQ-031", party=self.party, name="Eski dala")
+
+        self.create()
+
+        self.assertEqual(
+            sorted(Farm.objects.values_list("code", flat=True)),
+            ["F-SMQ-031", "F-SMQ-032"],
+        )
+
+    def test_a_name_is_required(self):
+        response = self.create(name="")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Farm.objects.exists())
