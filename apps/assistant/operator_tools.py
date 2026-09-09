@@ -91,8 +91,18 @@ def definitions() -> list[dict[str, Any]]:
                         "type": "integer",
                         "minimum": 1,
                         "description": (
-                            "Keep only lots whose sell-by date falls within this "
-                            "many days. Omit for no date filter."
+                            "Keep only lots whose sell-by date falls between "
+                            "today and this many days from now. Already-expired "
+                            "lots are not included - ask for those with "
+                            "`expired`. Omit for no date filter."
+                        ),
+                    },
+                    "expired": {
+                        "type": "string",
+                        "enum": ["yes", "no"],
+                        "description": (
+                            "'yes' for lots already past their sell-by date, "
+                            "'no' for lots still inside it. Omit for both."
                         ),
                     },
                 },
@@ -482,13 +492,30 @@ def _find_lots(request, payload: dict[str, Any]) -> dict[str, Any]:
         )
         applied["zone"] = zone
 
+    today = timezone.localdate()
+
     days = payload.get("expiring_within_days") or 0
     if isinstance(days, int) and days > 0:
+        # Bounded at both ends. Without the lower bound this matched every lot
+        # that had ever expired, and answered "what is expiring this week?"
+        # with a lot whose date passed a week ago.
         visible = visible.filter(
             sell_by__isnull=False,
-            sell_by__lte=timezone.localdate() + timedelta(days=days),
+            sell_by__gte=today,
+            sell_by__lte=today + timedelta(days=days),
         )
         applied["expiring_within_days"] = days
+
+    expired = _one_of(payload.get("expired"), "expired", {"yes", "no"})
+    if expired:
+        # The other half of the same question, and a different one to answer:
+        # a lot past its date is a write-off decision, not a sale.
+        visible = (
+            visible.filter(sell_by__isnull=False, sell_by__lt=today)
+            if expired == "yes"
+            else visible.filter(Q(sell_by__isnull=True) | Q(sell_by__gte=today))
+        )
+        applied["expired"] = expired
 
     pledged = _one_of(payload.get("pledged"), "pledged", {"yes", "no"})
     if pledged:
@@ -890,7 +917,11 @@ def _rendered(value: Any) -> Any:
         elif key.endswith("_g"):
             stem = key[: -len("_g")]
             if stem not in out:
-                out[stem] = f"{raw / 1000:,.1f} kg"
+                kg = raw / 1000
+                # A whole number of kilograms keeps no decimal: the model
+                # copies these strings verbatim, and "4,200.0 kg" mid-sentence
+                # reads like an instrument reading rather than a weight.
+                out[stem] = f"{kg:,.0f} kg" if kg == int(kg) else f"{kg:,.1f} kg"
 
     return out
 

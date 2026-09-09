@@ -37,7 +37,7 @@ from rest_framework.decorators import (
     throttle_classes,
 )
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.renderers import JSONRenderer
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 
 from apps.assistant import client
@@ -72,6 +72,40 @@ def _frame(event: str, payload: dict) -> bytes:
     second of them malformed.
     """
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+
+class EventStreamRenderer(BaseRenderer):
+    """Lets DRF negotiate `text/event-stream`, which is what the widget asks for.
+
+    Content negotiation runs **before** the view body. A client that honestly
+    declares `Accept: text/event-stream` - which both widgets do, because that
+    is what they are about to read - was refused with 406 and never reached the
+    code below, no matter that the view was about to stream exactly that.
+
+    This went unnoticed through every end-to-end check because `curl` sends
+    `Accept: */*` unless told otherwise, and `*/*` is satisfied by the JSON
+    renderer. The transport was tested with a header the real client does not
+    send. `test_views.py` now asks with the browser's header, which is the test
+    that was missing rather than the one that failed.
+
+    `render` is only ever reached for an error DRF raises before the view
+    returns its stream - a throttle, a permission, a malformed body. Those are
+    emitted as one SSE frame in the shape the client's parser already knows, so
+    a refusal arrives as a readable error rather than as a stream that opens
+    and closes saying nothing.
+    """
+
+    media_type = "text/event-stream"
+    format = "event-stream"
+    charset = "utf-8"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None) -> str:
+        detail = ""
+        if isinstance(data, dict):
+            detail = str(data.get("detail", ""))
+        status = getattr(renderer_context.get("response"), "status_code", 0) if renderer_context else 0
+        code = {401: "signed_out", 403: "signed_out", 429: "busy"}.get(status, "failed")
+        return _frame(code and "error", {"code": code, "detail": detail}).decode()
 
 
 def _events(**kwargs) -> Iterator[bytes]:
@@ -112,7 +146,7 @@ def _operator_events(request, **kwargs) -> Iterator[bytes]:
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @throttle_classes([AssistantBurstThrottle, AssistantHourThrottle])
-@renderer_classes([JSONRenderer])
+@renderer_classes([JSONRenderer, EventStreamRenderer])
 def ask(request):
     body = request.data if isinstance(request.data, dict) else {}
     history = body.get("history")
@@ -147,7 +181,7 @@ def ask(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, requires("view")])
 @throttle_classes([AssistantPanelThrottle])
-@renderer_classes([JSONRenderer])
+@renderer_classes([JSONRenderer, EventStreamRenderer])
 def panel_ask(request):
     body = request.data if isinstance(request.data, dict) else {}
     history = body.get("history")

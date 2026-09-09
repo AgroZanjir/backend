@@ -228,6 +228,28 @@ class FilterTests(OperatorFixture):
         self.assertEqual(pledged["results"][0]["status"], "registered")
         self.assertTrue(pledged["results"][0]["pledged"])
 
+    def test_a_lot_that_already_expired_is_not_one_that_is_about_to(self):
+        """The window had no floor, so "expiring this week" answered with a
+        lot whose date passed a week ago - which for a hub manager is the
+        difference between something to sell and something to write off."""
+        gone = self.mine
+        gone.sell_by = timezone.localdate() - timedelta(days=7)
+        gone.save(update_fields=["sell_by"])
+
+        self.assertEqual(self._find(expiring_within_days=7)["results"], [])
+
+    def test_the_expired_ones_can_still_be_asked_for(self):
+        gone = self.mine
+        gone.sell_by = timezone.localdate() - timedelta(days=7)
+        gone.save(update_fields=["sell_by"])
+        alive = self.theirs
+        alive.sell_by = timezone.localdate() + timedelta(days=3)
+        alive.save(update_fields=["sell_by"])
+
+        self.assertEqual(
+            [r["code"] for r in self._find(expired="yes")["results"]], [gone.code]
+        )
+
     def test_expiring_within_days_counts_from_today_not_from_the_dataset(self):
         soon = self.mine
         soon.sell_by = timezone.localdate() + timedelta(days=3)
@@ -726,7 +748,16 @@ class RenderedQuantityTests(OperatorFixture):
         row = operator_tools.run(_request(self.farmer), "find_lots", {})["results"][0]
 
         self.assertEqual(row["net_weight_g"], 4_200_000)
-        self.assertEqual(row["net_weight"], "4,200.0 kg")
+        # No trailing decimal on a whole number of kilograms - the model copies
+        # these verbatim, and "4,200.0 kg" mid-sentence reads like an
+        # instrument reading rather than a weight.
+        self.assertEqual(row["net_weight"], "4,200 kg")
+
+    def test_a_part_kilogram_keeps_its_decimal(self):
+        self.assertEqual(
+            operator_tools._rendered({"net_weight_g": 4_250_500})["net_weight"],
+            "4,250.5 kg",
+        )
 
     def test_a_lien_amount_takes_the_currency_beside_it(self):
         lien = operator_tools.run(_request(self.farmer), "find_liens", {})["results"][0]
@@ -750,7 +781,7 @@ class RenderedQuantityTests(OperatorFixture):
             _request(self.farmer), "lot_passport", {"code": self.mine.code}
         )
 
-        self.assertEqual(passport["lot"]["net_weight"], "4,200.0 kg")
+        self.assertEqual(passport["lot"]["net_weight"], "4,200 kg")
 
     def test_a_flag_is_not_mistaken_for_a_quantity(self):
         # `True` is an int in Python, and a booking flag rendered as "0.0 kg"
@@ -758,3 +789,77 @@ class RenderedQuantityTests(OperatorFixture):
         rendered = operator_tools._rendered({"passed_g": True})
 
         self.assertNotIn("passed", rendered)
+
+
+@override_settings(ASSISTANT_ADAPTER="auto", ASSISTANT_API_KEY="")
+class AcceptHeaderTests(OperatorFixture):
+    """Both endpoints must answer the header the widgets actually send.
+
+    DRF negotiates content **before** the view body runs. With only
+    `JSONRenderer` declared, a client asking for `Accept: text/event-stream` -
+    which both widgets do, because that is what they are about to read - got
+    406 and never reached the streaming code at all. The assistant did not work
+    in a browser, and could not have.
+
+    Every end-to-end check missed it because `curl` sends `Accept: */*` unless
+    told otherwise, and `*/*` is satisfied by JSON. These ask the way the
+    browser asks.
+    """
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def _ask(self, path, **extra):
+        return self.client.post(
+            path,
+            data={"question": "How many lots do I have?"},
+            content_type="application/json",
+            HTTP_ACCEPT="text/event-stream",
+            **extra,
+        )
+
+    def test_the_panel_endpoint_accepts_the_event_stream_header(self):
+        self.client.force_login(self.farmer)
+
+        response = self._ask(reverse("assistant:panel-ask"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        self.assertIn(b"event:", b"".join(response.streaming_content))
+
+    def test_the_public_endpoint_accepts_it_too(self):
+        response = self._ask(reverse("assistant:ask"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+
+    def test_a_client_asking_for_json_is_still_served(self):
+        # `*/*` is what curl and the schema tooling send; it must keep working.
+        self.client.force_login(self.farmer)
+
+        response = self.client.post(
+            reverse("assistant:panel-ask"),
+            data={"question": "How many lots do I have?"},
+            content_type="application/json",
+            HTTP_ACCEPT="*/*",
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_refusal_reaches_an_event_stream_client_as_a_readable_frame(self):
+        """A throttle or a permission is raised before the view streams anything.
+
+        Rendered through the event-stream renderer it becomes one `error`
+        frame in the shape the client's parser already knows, rather than a
+        stream that opens and closes saying nothing.
+        """
+        stranger = User.objects.create(username="nocaps")
+        self.client.force_login(stranger)
+
+        response = self._ask(reverse("assistant:panel-ask"))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b"event: error", response.content)
+        self.assertIn(b"signed_out", response.content)
