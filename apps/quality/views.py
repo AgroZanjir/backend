@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
@@ -17,7 +18,12 @@ from rest_framework.response import Response
 
 from apps.common.api import audit, requires
 from apps.lots.models import Lot
-from apps.panels.serializers import qc_payload, trial_detail_payload
+from apps.documents.models import Document
+from apps.panels.serializers import (
+    document_payload,
+    qc_payload,
+    trial_detail_payload,
+)
 from apps.quality.models import PilotTrial, QcRecord, TrialArm, TrialObservation
 from apps.registry.models import Product
 
@@ -227,4 +233,93 @@ def create_trial(request):
     return Response(
         {"code": trial.code, "status": trial.status},
         status=status.HTTP_201_CREATED,
+    )
+
+
+class LabRequestSerializer(serializers.Serializer):
+    lot = serializers.CharField()
+    laboratory = serializers.CharField(required=False, allow_blank=True)
+    note = serializers.CharField(required=False, allow_blank=True)
+
+
+@extend_schema(
+    summary="Send a sample to a laboratory",
+    description=(
+        "Records the report before it exists. The vault already has a status "
+        "for a document that is awaited, and that is what is being created "
+        "here: the lot now visibly owes a laboratory report, an export screen "
+        "can see the set is incomplete, and the lab issues the same row when "
+        "the result comes back rather than a second one beside it."
+    ),
+    request=LabRequestSerializer,
+    responses={201: dict},
+)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, requires("capture")])
+@transaction.atomic
+def request_lab_report(request):
+    payload = LabRequestSerializer(data=request.data)
+    payload.is_valid(raise_exception=True)
+    data = payload.validated_data
+
+    from apps.panels.views import visible_lots
+
+    # The same five routes their screens use: a sample is sent for a lot they
+    # are actually handling.
+    lot = (
+        visible_lots(request.user)
+        .select_for_update()
+        .filter(code=data["lot"])
+        .first()
+    )
+    if lot is None:
+        return Response(
+            {"detail": "No such lot.", "blockers": ["No such lot."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # One outstanding request at a time. A second one does not get the sample
+    # analysed twice; it leaves two rows awaited and an export screen that
+    # cannot tell which report it is waiting for.
+    existing = Document.objects.filter(
+        subject_type=Document.Subject.LOT,
+        subject_code=lot.code,
+        doc_type=Document.Type.LAB,
+        status=Document.Status.PENDING,
+    ).first()
+    if existing is not None:
+        return Response(
+            {
+                "detail": "A laboratory report is already awaited for this lot.",
+                "blockers": [
+                    "A laboratory report is already awaited for this lot "
+                    f"({existing.code}). It is issued when the result arrives."
+                ],
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    document = Document.objects.create(
+        code=f"LAB-{lot.code}-{timezone.now():%H%M%S}",
+        subject_type=Document.Subject.LOT,
+        subject_code=lot.code,
+        doc_type=Document.Type.LAB,
+        name_key="doc_lab",
+        status=Document.Status.PENDING,
+        issued_by=data.get("laboratory", ""),
+        reference=data.get("note", "")[:64],
+    )
+    lot.log(
+        "sample_sent",
+        actor_user=request.user,
+        actor_label=request.user.display_name,
+        payload={
+            "document": document.code,
+            "laboratory": document.issued_by,
+            "note": document.reference,
+        },
+    )
+    audit(request, "a_created", object_ref=document.code, capability="capture")
+    return Response(
+        document_payload(document, request), status=status.HTTP_201_CREATED
     )

@@ -44,6 +44,9 @@ class Document(BaseModel):
         CONTRACT = "contract", "Contract"
         LICENCE = "licence", "Licence"
         CHARTER = "charter", "Charter"
+        # Evidence rather than paperwork: what an inspector photographs at the
+        # bench, and what an adjuster asks for when a claim turns on condition.
+        PHOTO = "photo", "Photograph"
         REGISTRATION = "registration", "Registration certificate"
         OTHER = "other", "Other"
 
@@ -66,9 +69,17 @@ class Document(BaseModel):
     issued_by = models.CharField(max_length=160, blank=True)
     issued_on = models.DateField(null=True, blank=True)
     expires_on = models.DateField(null=True, blank=True)
-    # The object-storage key. Never the bytes.
+    # The object-storage key. Never the bytes: the row is small, replicated
+    # and dumped nightly, and a photograph is none of those things. Which
+    # storage answers the key is `STORAGES["default"]` - a filesystem in the
+    # pilot, S3 later, and nothing in this module changes when it moves.
     file_ref = models.CharField(max_length=512, blank=True)
+    # Over the bytes as stored. Evidence that has to be shown unchanged later
+    # needs something to be shown against, and the platform already argues this
+    # way about its event log.
     checksum_sha256 = models.CharField(max_length=64, blank=True)
+    byte_size = models.PositiveBigIntegerField(default=0)
+    content_type = models.CharField(max_length=100, blank=True)
 
     class Meta:
         ordering = ["subject_code", "doc_type"]
@@ -76,6 +87,15 @@ class Document(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.code} ({self.doc_type})"
+
+    @property
+    def url(self) -> str:
+        """Where the bytes are, or "" for a row that records a paper original."""
+        if not self.file_ref:
+            return ""
+        from django.core.files.storage import default_storage
+
+        return default_storage.url(self.file_ref)
 
     @property
     def is_expired(self) -> bool:

@@ -238,8 +238,12 @@ def _excursions_for(lot) -> list:
     return [e for e in candidates if lot.code in (e.affected_lot_codes or [])]
 
 
-def _passport(lot, *, public: bool) -> dict:
+def _passport(lot, *, public: bool, request=None) -> dict:
     """The lot passport, in two depths.
+
+    `request` only makes the documents' URLs absolute; it is optional because
+    the assistant composes a passport for a model to read, and a model does not
+    fetch a photograph.
 
     The public version answers "is this real and how was it handled?" without
     naming an owner, a price or a lender. That is the whole design of the
@@ -276,7 +280,7 @@ def _passport(lot, *, public: bool) -> dict:
             ).select_related("parent", "child")
         ],
         "documents": [
-            build.document_payload(d)
+            build.document_payload(d, request)
             for d in Document.objects.filter(subject_type="lot", subject_code=lot.code)
         ],
     }
@@ -351,7 +355,7 @@ def lot_passport(request, code: str):
     # public one, which is open to everybody anyway.
     lot = get_object_or_404(visible_lots(request.user), code=code)
     audit(request, "a_viewed", object_ref=lot.code, capability="view")
-    return Response(_passport(lot, public=False))
+    return Response(_passport(lot, public=False, request=request))
 
 
 @extend_schema(
@@ -361,7 +365,7 @@ def lot_passport(request, code: str):
 @permission_classes([AllowAny])
 def public_passport(request, code: str):
     lot = get_object_or_404(_lot_queryset(), code=code)
-    return Response(_passport(lot, public=True))
+    return Response(_passport(lot, public=True, request=request))
 
 
 # --- hub --------------------------------------------------------------------
@@ -606,7 +610,9 @@ def documents(request):
         queryset = queryset.filter(subject_type=subject_type)
     if subject_code:
         queryset = queryset.filter(subject_code=subject_code)
-    return Response({"results": [build.document_payload(d) for d in queryset]})
+    return Response(
+        {"results": [build.document_payload(d, request) for d in queryset]}
+    )
 
 
 # --- the bell ---------------------------------------------------------------

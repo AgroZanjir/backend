@@ -6,4 +6,5 @@ app_name = "documents"
 
 urlpatterns = [
     path("", views.create_document, name="create"),
+    path("upload/", views.upload_document, name="upload"),
 ]

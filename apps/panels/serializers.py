@@ -141,7 +141,15 @@ def qc_payload(record) -> dict:
     }
 
 
-def document_payload(document) -> dict:
+def document_payload(document, request=None) -> dict:
+    """One row of the vault.
+
+    `request` is what makes `url` absolute. The website and the panels are a
+    separate origin from the API in development, so a relative /media path
+    resolves against the wrong host and every thumbnail is a broken image;
+    behind nginx one origin serves both and it would have worked, which is the
+    worst kind of bug - one that only appears where the work is done.
+    """
     return {
         "code": document.code,
         "subject_type": document.subject_type,
@@ -154,6 +162,14 @@ def document_payload(document) -> dict:
         "issued_on": document.issued_on,
         "expires_on": document.expires_on,
         "expired": document.is_expired,
+        # Empty for a row that records a paper original somebody else holds.
+        "url": (
+            request.build_absolute_uri(document.url)
+            if request is not None and document.url
+            else document.url
+        ),
+        "checksum": document.checksum_sha256,
+        "bytes": document.byte_size,
     }
 
 
