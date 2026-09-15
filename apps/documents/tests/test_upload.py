@@ -7,6 +7,7 @@ import tempfile
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
@@ -33,6 +34,11 @@ MEDIA = tempfile.mkdtemp()
 
 
 @override_settings(MEDIA_ROOT=MEDIA)
+# Signs in through the demo door, which is the quick way to a session in a
+# test. The production guard shuts that door when DEBUG is False - and the
+# test runner sets DEBUG=False - so these opt back into it deliberately.
+# The guard itself is tested in apps/common/tests/test_security.py.
+@override_settings(DEBUG=True)
 class UploadTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -69,6 +75,7 @@ class UploadTests(TestCase):
         super().tearDownClass()
 
     def setUp(self):
+        cache.clear()
         self.access = self.client.post(
             reverse("registry:oneid"),
             {"persona": "q.inspector"},

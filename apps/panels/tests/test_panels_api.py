@@ -6,11 +6,16 @@ database are built from, so a change that breaks it should break the suite.
 """
 
 from django.core.management import call_command
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import TestCase, override_settings
 
 from apps.lots.models import Lot
 
 
+# Signs in through the demo door, which the production guard shuts when DEBUG
+# is False - and the test runner sets DEBUG=False. Opted back into
+# deliberately; the guard has its own tests in apps/common/tests/.
+@override_settings(DEBUG=True)
 class PanelApiTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -20,6 +25,10 @@ class PanelApiTests(TestCase):
         # roles only exist on somebody. One shared password, because these are
         # signed in through the stub adapter by username anyway.
         call_command("seed_accounts", password="test-only", verbosity=0)
+
+    def setUp(self):
+        # The sign-in throttles count in a cache that outlives a test.
+        cache.clear()
 
     def sign_in(self, persona: str) -> dict:
         response = self.client.post(

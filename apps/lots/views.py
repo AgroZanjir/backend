@@ -22,7 +22,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.common.api import audit, has_capability, requires
-from apps.lots.models import Lot, LotRelation, dispatch_blockers
+from apps.lots.models import (
+    Lot,
+    LotRelation,
+    dispatch_blockers,
+    lots_writable_by,
+)
 from apps.panels.serializers import lot_payload
 from apps.registry.models import Farm, Party, Product
 
@@ -123,7 +128,7 @@ class GradeSerializer(serializers.Serializer):
 @permission_classes([IsAuthenticated, requires("capture")])
 @transaction.atomic
 def grade(request, code: str):
-    lot = Lot.objects.select_for_update().get(code=code)
+    lot = lots_writable_by(request.user).select_for_update().get(code=code)
     payload = GradeSerializer(data=request.data)
     payload.is_valid(raise_exception=True)
     data = payload.validated_data
@@ -167,7 +172,7 @@ class SplitSerializer(serializers.Serializer):
 @permission_classes([IsAuthenticated, requires("capture")])
 @transaction.atomic
 def split(request, code: str):
-    parent = Lot.objects.select_for_update().get(code=code)
+    parent = lots_writable_by(request.user).select_for_update().get(code=code)
     payload = SplitSerializer(data=request.data)
     payload.is_valid(raise_exception=True)
 
@@ -222,7 +227,7 @@ class TransitionSerializer(serializers.Serializer):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, requires("transact")])
 def reserve(request, code: str):
-    lot = Lot.objects.get(code=code)
+    lot = lots_writable_by(request.user).get(code=code)
     try:
         lot.transition(Lot.Status.RESERVED)
     except ValidationError as exc:
@@ -248,7 +253,7 @@ def reserve(request, code: str):
 @permission_classes([IsAuthenticated, requires("approve")])
 @transaction.atomic
 def dispatch(request, code: str):
-    lot = Lot.objects.select_for_update().get(code=code)
+    lot = lots_writable_by(request.user).select_for_update().get(code=code)
     blockers = dispatch_blockers(lot)
     if blockers:
         return Response(
@@ -281,7 +286,7 @@ def dispatch(request, code: str):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, requires("approve")])
 def write_off(request, code: str):
-    lot = Lot.objects.get(code=code)
+    lot = lots_writable_by(request.user).get(code=code)
     try:
         lot.transition(Lot.Status.WRITTEN_OFF)
     except ValidationError as exc:
@@ -306,7 +311,11 @@ def write_off(request, code: str):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def verify_chain(request, code: str):
-    lot = Lot.objects.get(code=code)
+    # A read, so read visibility: a bank checking the chain under its own
+    # collateral is exactly who this is for.
+    from apps.panels.views import visible_lots
+
+    lot = visible_lots(request.user).get(code=code)
     intact = lot.chain_intact
     if has_capability(request.user, "audit"):
         audit(request, "a_verified", object_ref=lot.code, capability="audit")

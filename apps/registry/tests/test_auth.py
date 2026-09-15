@@ -1,7 +1,8 @@
 """Sessions: OneID at the front, JWT behind it, refresh in an httpOnly cookie."""
 
 from django.core.management import call_command
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from apps.registry.models import (
@@ -15,6 +16,11 @@ from apps.registry.models import (
 )
 
 
+# Signs in through the demo door, which is the quick way to a session in a
+# test. The production guard shuts that door when DEBUG is False - and the
+# test runner sets DEBUG=False - so these opt back into it deliberately.
+# The guard itself is tested in apps/common/tests/test_security.py.
+@override_settings(DEBUG=True)
 class AuthTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -35,6 +41,13 @@ class AuthTests(TestCase):
             oneid_verified=True,
         )
         Membership.objects.create(user=cls.user, party=party, role=role)
+
+    def setUp(self):
+        cache.clear()
+        # The sign-in throttles count in the cache, and the cache outlives a
+        # test. Without this the fiftieth test to sign in is the one that
+        # gets a 429 - a failure that moves around as tests are reordered.
+        cache.clear()
 
     def sign_in(self, persona="d.yusupov"):
         return self.client.post(
@@ -97,8 +110,13 @@ class AuthTests(TestCase):
         self.assertEqual(response.json()["user"]["username"], "d.yusupov")
 
 
+@override_settings(DEBUG=True)
 class UserStatusTests(TestCase):
     """Suspending an account, through the route the panel actually calls."""
+
+    def setUp(self):
+        # The sign-in throttles count in a cache that outlives a test.
+        cache.clear()
 
     @classmethod
     def setUpTestData(cls):
@@ -147,8 +165,13 @@ class UserStatusTests(TestCase):
         self.assertFalse(self.victim.is_active)
 
 
+@override_settings(DEBUG=True)
 class UserRoleTests(TestCase):
     """Changing what a person is, through the route the panel calls."""
+
+    def setUp(self):
+        # The sign-in throttles count in a cache that outlives a test.
+        cache.clear()
 
     @classmethod
     def setUpTestData(cls):
@@ -267,8 +290,13 @@ class UserRoleTests(TestCase):
         self.assertEqual(self.admin.status, "active")
 
 
+@override_settings(DEBUG=True)
 class FarmTests(TestCase):
     """Registering a production site, which the panel's button had no route for."""
+
+    def setUp(self):
+        # The sign-in throttles count in a cache that outlives a test.
+        cache.clear()
 
     @classmethod
     def setUpTestData(cls):

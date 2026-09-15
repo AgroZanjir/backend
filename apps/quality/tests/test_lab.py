@@ -1,7 +1,8 @@
 """Sending a sample, which records the report before it exists."""
 
 from django.core.management import call_command
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from apps.documents.models import Document
@@ -17,6 +18,11 @@ from apps.registry.models import (
 )
 
 
+# Signs in through the demo door, which is the quick way to a session in a
+# test. The production guard shuts that door when DEBUG is False - and the
+# test runner sets DEBUG=False - so these opt back into it deliberately.
+# The guard itself is tested in apps/common/tests/test_security.py.
+@override_settings(DEBUG=True)
 class LabRequestTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -46,6 +52,12 @@ class LabRequestTests(TestCase):
             net_weight_g=1_000_000,
             gross_weight_g=1_050_000,
         )
+
+    def setUp(self):
+        # The sign-in throttles count in the cache, and the cache outlives a
+        # test. Without this the fiftieth test to sign in is the one that
+        # gets a 429 - a failure that moves around as tests are reordered.
+        cache.clear()
 
     def send(self, **body):
         access = self.client.post(

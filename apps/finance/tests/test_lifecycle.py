@@ -6,13 +6,19 @@ that could reach them.
 """
 
 from django.core.management import call_command
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from apps.finance.models import FinanceApplication
 from apps.registry.models import Membership, OrganisationType, Party, Role, User
 
 
+# Signs in through the demo door, which is the quick way to a session in a
+# test. The production guard shuts that door when DEBUG is False - and the
+# test runner sets DEBUG=False - so these opt back into it deliberately.
+# The guard itself is tested in apps/common/tests/test_security.py.
+@override_settings(DEBUG=True)
 class LifecycleTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -47,6 +53,7 @@ class LifecycleTests(TestCase):
         return user
 
     def setUp(self):
+        cache.clear()
         self.application = FinanceApplication.objects.create(
             code="FA-T-0001",
             applicant_party=self.farm,

@@ -24,7 +24,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.common.api import audit, requires
-from apps.lots.models import Lot
+from apps.lots.models import Lot, lots_writable_by, zones_writable_by
 from apps.panels.serializers import arrival_payload, excursion_payload, lot_payload, zone_payload
 from apps.registry.models import Farm, Product
 from apps.storage.models import (
@@ -54,8 +54,15 @@ def place(request):
     payload.is_valid(raise_exception=True)
     data = payload.validated_data
 
-    lot = Lot.objects.select_for_update().get(code=data["lot"])
-    zone = StorageZone.objects.select_related("facility").get(code=data["zone"])
+    # Putting a lot away is an act on both: the lot has to be one this
+    # organisation handles, and the room has to be one it runs. Unscoped, a
+    # hub could fill a competitor's cold store with a stranger's produce.
+    lot = lots_writable_by(request.user).select_for_update().get(code=data["lot"])
+    zone = (
+        zones_writable_by(request.user)
+        .select_related("facility")
+        .get(code=data["zone"])
+    )
     quantity = data.get("quantity_g") or lot.net_weight_g
 
     # The lifecycle is REGISTERED -> GRADED -> STORED. Putting an ungraded lot
@@ -137,7 +144,7 @@ def _sell_by(lot, zone):
 @permission_classes([IsAuthenticated, requires("capture")])
 @transaction.atomic
 def remove(request):
-    lot = Lot.objects.get(code=request.data["lot"])
+    lot = lots_writable_by(request.user).get(code=request.data["lot"])
     placement = (
         StoragePlacement.objects.select_for_update()
         .filter(lot=lot, removed_at__isnull=True)

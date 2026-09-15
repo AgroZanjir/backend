@@ -30,12 +30,20 @@ from django.conf import settings
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    throttle_classes,
+)
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.registry.throttles import (
+    SignInAccountThrottle,
+    SignInAddressThrottle,
+)
 from apps.registry.models import User
 
 
@@ -60,6 +68,18 @@ def resolve_identity(*, persona: str = "", pinfl: str = "", code: str = "") -> U
         raise OneIDError(
             f"ONEID_ADAPTER={adapter!r} has no implementation; the stub is the only "
             "adapter until the OneID integration lands."
+        )
+
+    # The stub resolves a session from a username alone. That is the point of
+    # it - the panels have to be browsable before OneID exists - and it is a
+    # complete authentication bypass anywhere a stranger can reach the API.
+    # `manage.py check --deploy` refuses this configuration and both scripts
+    # gate on it, but a check is only run by whoever remembers to run it, and
+    # gunicorn starts without one. So the door refuses as well.
+    if not settings.DEBUG:
+        raise OneIDError(
+            "The demonstration sign-in is not available on this deployment. "
+            "Sign in with a username and password."
         )
 
     if pinfl:
@@ -164,6 +184,7 @@ class OneIDSignInSerializer(serializers.Serializer):
 )
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([SignInAddressThrottle, SignInAccountThrottle])
 def oneid_sign_in(request):
     payload = OneIDSignInSerializer(data=request.data)
     payload.is_valid(raise_exception=True)
@@ -198,6 +219,7 @@ class PasswordSignInSerializer(serializers.Serializer):
 )
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([SignInAddressThrottle, SignInAccountThrottle])
 def password_sign_in(request):
     """The back door for staff and for anyone OneID cannot reach.
 
@@ -287,6 +309,13 @@ def personas(request):
     choose from once identity is real, and an endpoint that keeps offering
     them would be an open door.
     """
+    # Nothing here off a developer's machine. This lists real accounts - names,
+    # organisations and roles - and with the stub door open it is a list of
+    # exactly whom to become. Even with the door shut it is a staff directory
+    # handed to anybody who asks.
+    if not settings.DEBUG:
+        return Response({"adapter": getattr(settings, "ONEID_ADAPTER", "stub"), "personas": []})
+
     if getattr(settings, "ONEID_ADAPTER", "stub") != "stub":  # pragma: no cover
         return Response({"adapter": settings.ONEID_ADAPTER, "personas": []})
 

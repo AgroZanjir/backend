@@ -30,6 +30,7 @@ from typing import Callable
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.common.models import BaseModel, Currency
@@ -348,3 +349,58 @@ class LotRelation(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.parent.code} -{self.kind}-> {self.child.code}"
+
+
+def lots_writable_by(user):
+    """Every lot this person's organisation may *act* on.
+
+    Deliberately narrower than the panels' `visible_lots`, which answers a
+    different question. Five parties can see a lot; three can touch it:
+
+    * the **owner** - it is their produce;
+    * whoever has **custody** - the hub that took it in at the gate, which is
+      what the gate, grading and put-away screens work on before anything has
+      been put in a room;
+    * the **operator of the room it is in** - a lot on their shelf, whoever
+      owns it.
+
+    The two that are left out are the point of the function. A bank holds a
+    lien and an insurer holds a policy: both must read the lot in full, and
+    neither may grade it, move it, reserve it or write it off. Before this
+    existed every write took a lot code from the request body and fetched it
+    unscoped, so any role carrying the capability could act on any lot on the
+    platform - a farm manager could write off another farm's harvest.
+    """
+    from apps.common.api import is_platform, memberships_of
+
+    queryset = Lot.objects.all()
+    if is_platform(user):
+        return queryset
+
+    party_ids = [m.party_id for m in memberships_of(user)]
+    return queryset.filter(
+        Q(owner_party_id__in=party_ids)
+        | Q(custody_party_id__in=party_ids)
+        | Q(
+            placements__removed_at__isnull=True,
+            placements__zone__facility__operator_party_id__in=party_ids,
+        )
+    ).distinct()
+
+
+def zones_writable_by(user):
+    """Rooms this person's organisation runs.
+
+    Putting a lot away is an act on the room as much as on the lot: it spends
+    the room's capacity and it makes that operator responsible for the
+    conditions inside it.
+    """
+    from apps.common.api import is_platform, memberships_of
+    from apps.storage.models import StorageZone
+
+    queryset = StorageZone.objects.all()
+    if is_platform(user):
+        return queryset
+
+    party_ids = [m.party_id for m in memberships_of(user)]
+    return queryset.filter(facility__operator_party_id__in=party_ids)

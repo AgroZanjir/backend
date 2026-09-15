@@ -116,6 +116,19 @@ DATABASES = {
     )
 }
 
+# Every rate limit in this project counts in here: the assistant's, the
+# contact form's, and the two on the sign-in doors. The default is this
+# process's own memory, which means the limits are *per gunicorn worker* -
+# three workers, three times the limit. A deployment that means these numbers
+# points CACHE_URL at a shared Redis; infra/README.md says so beside it.
+CACHES = {
+    "default": env.cache_url(
+        "CACHE_URL", default="locmemcache://agrozanjir", backend=None
+    )
+    if hasattr(env, "cache_url")
+    else {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+}
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -158,6 +171,9 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # "not yours" and "no such thing" answer identically, and a domain refusal
+    # stays a 409 rather than becoming a 500. See apps/common/exceptions.py.
+    "EXCEPTION_HANDLER": "apps.common.exceptions.exception_handler",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
     "PAGE_SIZE": 50,
     # Only the assistant is throttled, and only because it is the one endpoint
@@ -175,6 +191,13 @@ REST_FRAMEWORK = {
         # one table a stranger can put rows in, so it is bounded the same way.
         "enquiry-burst": env("ENQUIRY_BURST_RATE", default="3/min"),
         "enquiry-day": env("ENQUIRY_DAY_RATE", default="20/day"),
+        # The doors. Every other endpoint is bounded by a session; these are
+        # the ones that issue a session, so they are bounded by nothing else.
+        # Generous enough that a person who has forgotten which password it is
+        # does not lock themselves out, tight enough that a dictionary does
+        # not fit in an afternoon.
+        "signin-address": env("SIGNIN_ADDRESS_RATE", default="10/min"),
+        "signin-account": env("SIGNIN_ACCOUNT_RATE", default="20/hour"),
     },
 }
 
@@ -233,6 +256,11 @@ REFRESH_COOKIE = {
 # sign-in screen shows that banner. Nothing else in the system knows which
 # adapter answered.
 ONEID_ADAPTER = env("ONEID_ADAPTER", default="stub")
+
+# An assertion by whoever deployed this, read only by the deployment check in
+# apps/common/checks.py. It cannot verify that the passwords were rotated - it
+# can only refuse to let the question go unasked.
+SEEDED_PASSWORDS_ROTATED = env.bool("SEEDED_PASSWORDS_ROTATED", default=False)
 
 # --- the website's assistant ------------------------------------------------
 

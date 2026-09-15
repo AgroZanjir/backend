@@ -17,7 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.common.api import audit, requires
-from apps.lots.models import Lot
+from apps.lots.models import Lot, lots_writable_by
 from apps.documents.models import Document
 from apps.panels.serializers import (
     document_payload,
@@ -50,7 +50,9 @@ def create_qc_record(request):
     payload.is_valid(raise_exception=True)
     data = payload.validated_data
 
-    lot = Lot.objects.select_for_update().get(code=data["lot"])
+    # An inspection is a write on the lot - it can move its grade and its
+    # status - so it is bounded the same way every other write on a lot is.
+    lot = lots_writable_by(request.user).select_for_update().get(code=data["lot"])
     record = QcRecord.objects.create(
         lot=lot,
         stage=data["stage"],
