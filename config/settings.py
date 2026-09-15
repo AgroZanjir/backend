@@ -60,6 +60,9 @@ LOCAL_APPS = [
     "apps.panels",       # the cross-cluster read composition the panels are served by
     "apps.assistant",    # no tables: the public website's assistant
     "apps.website",      # the one table a public visitor can write to
+    # Gives a refresh token somewhere to die. Without it "sign out" only
+    # deletes a cookie and the token it held stays valid until it expires.
+    "rest_framework_simplejwt.token_blacklist",
 ]
 
 # Identity is OneID's; this row is the local shadow of a person. Declared now
@@ -230,6 +233,10 @@ SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=env.int("ACCESS_TOKEN_MINUTES", default=30)),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=env.int("REFRESH_TOKEN_DAYS", default=7)),
     "ROTATE_REFRESH_TOKENS": True,
+    # Rotation alone mints a new token; it does not retire the old one. Both
+    # then work, so a captured refresh token survives every rotation the real
+    # user performs.
+    "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }

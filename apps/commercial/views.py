@@ -18,6 +18,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.commercial.models import (
+    contracts_writable_by,
+    shipments_writable_by,
+)
 from apps.commercial.models import ExportContract, Shipment, ShipmentLine
 from apps.common.api import audit, requires
 from apps.documents.models import Document
@@ -97,7 +101,7 @@ def create_shipment(request):
 @permission_classes([IsAuthenticated, requires("approve")])
 @transaction.atomic
 def depart(request, code: str):
-    shipment = Shipment.objects.select_for_update().get(code=code)
+    shipment = shipments_writable_by(request.user).select_for_update().get(code=code)
     lines = list(shipment.lines.select_related("lot"))
 
     blocked = {
@@ -150,7 +154,7 @@ def depart(request, code: str):
 @permission_classes([IsAuthenticated, requires("transact")])
 @transaction.atomic
 def deliver(request, code: str):
-    shipment = Shipment.objects.select_for_update().get(code=code)
+    shipment = shipments_writable_by(request.user).select_for_update().get(code=code)
     result = get_port("carrier").confirm_delivery(str(shipment.id))
 
     shipment.status = Shipment.Status.DELIVERED
@@ -175,7 +179,7 @@ def deliver(request, code: str):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, requires("sign")])
 def lodge_declaration(request, code: str):
-    contract = ExportContract.objects.get(code=code)
+    contract = contracts_writable_by(request.user).get(code=code)
     documents = Document.objects.filter(
         subject_type=Document.Subject.EXPORT_CONTRACT, subject_code=contract.code
     )

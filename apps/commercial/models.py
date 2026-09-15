@@ -20,6 +20,7 @@ key in either direction.
 """
 
 from django.db import models
+from django.db.models import Q
 
 from apps.common.models import BaseModel, MoneyModel
 
@@ -204,3 +205,39 @@ class ShipmentLine(BaseModel):
     def __str__(self) -> str:
         return f"{self.shipment.code}: {self.lot.code}"
 
+
+def shipments_writable_by(user):
+    """Shipments this organisation is a party to.
+
+    The carrier moving it, and the exporter whose contract it is against.
+    Anyone else asking to depart or deliver somebody's consignment is asking
+    about a lorry that is not theirs.
+    """
+    from apps.common.api import is_platform, memberships_of
+
+    queryset = Shipment.objects.all()
+    if is_platform(user):
+        return queryset
+
+    party_ids = [m.party_id for m in memberships_of(user)]
+    return queryset.filter(
+        Q(carrier_party_id__in=party_ids)
+        | Q(export_contract__seller_party_id__in=party_ids)
+    ).distinct()
+
+
+def contracts_writable_by(user):
+    """Export contracts this organisation sells under.
+
+    Lodging a declaration commits the seller to a customs authority under
+    their own name, which is the one signature nobody else may make.
+    """
+    from apps.common.api import is_platform, memberships_of
+
+    queryset = ExportContract.objects.all()
+    if is_platform(user):
+        return queryset
+
+    return queryset.filter(
+        seller_party_id__in=[m.party_id for m in memberships_of(user)]
+    )

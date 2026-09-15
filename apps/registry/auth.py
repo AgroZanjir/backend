@@ -54,6 +54,19 @@ class OneIDError(Exception):
     """The identity provider refused, or does not know this person."""
 
 
+def _retire(token) -> None:
+    """Put a refresh token beyond use.
+
+    Separate because both doors out - refreshing and signing out - have to do
+    it, and because `blacklist()` raises if the blacklist app is not installed,
+    which is a configuration mistake rather than a request-time failure.
+    """
+    try:
+        token.blacklist()
+    except AttributeError:  # pragma: no cover - the app is in INSTALLED_APPS
+        pass
+
+
 def resolve_identity(*, persona: str = "", pinfl: str = "", code: str = "") -> User:
     """Return the person behind a OneID sign-in.
 
@@ -257,6 +270,13 @@ def refresh(request):
     try:
         token = RefreshToken(raw)
         user = User.objects.get(pk=token["user_id"])
+        # Suspending an account has to end the sessions it already has. The
+        # access token is checked against `is_active` on every request and dies
+        # within the half hour; this is the other half, and without it a
+        # suspended person kept renewing for the life of the refresh token -
+        # a week of access after being locked out.
+        if not user.is_active or user.status == User.Status.SUSPENDED:
+            raise TokenError("The account is not active.")
     except (TokenError, KeyError, User.DoesNotExist):
         response = Response(
             {"detail": "That session has expired."}, status=status.HTTP_401_UNAUTHORIZED
@@ -267,7 +287,11 @@ def refresh(request):
         return response
 
     response = Response()
-    # Rotation is on, so the old refresh token dies with this exchange.
+    # Retire the token that was presented. `ROTATE_REFRESH_TOKENS` governs
+    # simplejwt's own view, not this one: without this line the old token
+    # stayed valid alongside every replacement, so one capture was good until
+    # it expired however often the real session rotated.
+    _retire(token)
     access = _issue(response, user)
     response.data = session_payload(user, access=access)
     return response
@@ -277,6 +301,17 @@ def refresh(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def sign_out(request):
+    # Deleting the cookie only stops this browser sending it. Somebody signing
+    # out of a shared machine means the token itself, so retire it.
+    raw = request.COOKIES.get(settings.REFRESH_COOKIE["name"])
+    if raw:
+        try:
+            _retire(RefreshToken(raw))
+        except TokenError:
+            # Already expired or already retired: signing out twice is not an
+            # error, and neither is signing out of a session that has lapsed.
+            pass
+
     response = Response(status=status.HTTP_204_NO_CONTENT)
     response.delete_cookie(
         settings.REFRESH_COOKIE["name"], path=settings.REFRESH_COOKIE["path"]

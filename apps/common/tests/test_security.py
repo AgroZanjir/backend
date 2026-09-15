@@ -253,3 +253,45 @@ class SignInThrottleTests(Fixture):
             self.attempt(username="nobody.at.all")
 
             self.assertEqual(self.attempt(username="nobody.at.all").status_code, 429)
+
+
+@override_settings(DEBUG=True)
+class SessionEndingTests(Fixture):
+    """Signing out, and being suspended, have to end a session that exists."""
+
+    def refresh_cookie(self):
+        response = self.client.post(
+            reverse("registry:password"),
+            {"username": "me", "password": "correct-horse-battery-staple"},
+            content_type="application/json",
+        )
+        return response.cookies["az_refresh"].value
+
+    def refresh_with(self, raw):
+        self.client.cookies["az_refresh"] = raw
+        return self.client.post(reverse("registry:refresh"))
+
+    def test_signing_out_retires_the_token_not_just_the_cookie(self):
+        """A cookie deleted in one browser is not a session ended."""
+        raw = self.refresh_cookie()
+        self.client.post(reverse("registry:logout"))
+
+        self.assertEqual(self.refresh_with(raw).status_code, 401)
+
+    def test_a_refresh_retires_the_token_it_was_given(self):
+        """Otherwise one captured token works until it expires, however many
+        times the real session rotates."""
+        raw = self.refresh_cookie()
+        self.assertEqual(self.refresh_with(raw).status_code, 200)
+
+        self.assertEqual(self.refresh_with(raw).status_code, 401)
+
+    def test_a_suspended_account_cannot_keep_renewing(self):
+        """Suspending is the administrator's main control. It used to leave
+        the person a week of access on the refresh token they already had."""
+        raw = self.refresh_cookie()
+        self.me.status = User.Status.SUSPENDED
+        self.me.is_active = False
+        self.me.save(update_fields=["status", "is_active"])
+
+        self.assertEqual(self.refresh_with(raw).status_code, 401)
