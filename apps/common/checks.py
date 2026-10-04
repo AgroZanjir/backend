@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.core.checks import Error, Tags, Warning, register
+from django.db import connection
 
 
 # `deploy=True`: these run under `check --deploy` and not on every `check`.
@@ -38,8 +39,7 @@ def the_demo_identity_door_is_shut(app_configs, **kwargs):
             hint=(
                 "The stub resolves a session from a username with no proof of "
                 "identity, and /auth/personas/ lists the usernames. Set "
-                "ONEID_ADAPTER to a real adapter, or keep this deployment off "
-                "the internet. Password sign-in keeps working either way."
+                "ONEID_ADAPTER=disabled. Password sign-in keeps working."
             ),
             id="security.E101",
         )
@@ -54,9 +54,20 @@ def the_seeded_passwords_were_rotated(app_configs, **kwargs):
     can be given. They are in chat logs, in slide decks and in whatever was
     emailed round; on a public host they are all public.
     """
-    if settings.DEBUG:
+    if settings.DEBUG or getattr(settings, "SEEDED_PASSWORDS_ROTATED", False):
         return []
-    if not getattr(settings, "SEEDED_PASSWORDS_ROTATED", False):
+    from apps.common.management.commands.seed_accounts import ACCOUNTS
+    from apps.common.management.commands.seed_demo import USERS
+    from apps.registry.models import User
+
+    # First installation runs this before migrations. Do not hide connection
+    # errors: only the verified absence of this table is safe to skip.
+    if User._meta.db_table not in connection.introspection.table_names():
+        return []
+    usernames = {account[0] for _, accounts in ACCOUNTS for account in accounts}
+    usernames.update(account[0] for account in USERS)
+    seeded = User.objects.filter(username__in=usernames).only("password")
+    if any(user.has_usable_password() for user in seeded.iterator()):
         return [
             Warning(
                 "The seeded demonstration passwords may not have been rotated.",
@@ -69,3 +80,58 @@ def the_seeded_passwords_were_rotated(app_configs, **kwargs):
             )
         ]
     return []
+
+
+@register(Tags.security, deploy=True)
+def production_configuration(app_configs, **kwargs):
+    """Fail before migrations when production would use development fallbacks."""
+    errors = []
+
+    def require(condition, message, number):
+        if not condition:
+            errors.append(Error(message, id=f"security.E{number}"))
+
+    require(not settings.DEBUG, "DEBUG must be False for deployment.", 103)
+    secret = settings.SECRET_KEY
+    require(
+        len(secret) >= 50
+        and len(set(secret)) >= 5
+        and not secret.startswith(("django-insecure-", "dev-only-", "ci-only-", "static-build-")),
+        "Set a unique random DJANGO_SECRET_KEY of at least 50 characters.",
+        104,
+    )
+    require(
+        settings.DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql",
+        "Production DATABASE_URL must use PostgreSQL.",
+        105,
+    )
+    require(
+        settings.CACHES["default"]["BACKEND"] == "django.core.cache.backends.redis.RedisCache",
+        "Production CACHE_URL must use a shared Redis cache.",
+        106,
+    )
+    hosts = settings.ALLOWED_HOSTS
+    require(
+        "*" not in hosts and any(host not in {"localhost", "127.0.0.1", "[::1]"} for host in hosts),
+        "ALLOWED_HOSTS must include the explicit production hostname without '*'.",
+        107,
+    )
+    for name in ("CORS_ALLOWED_ORIGINS", "CSRF_TRUSTED_ORIGINS"):
+        origins = getattr(settings, name)
+        require(
+            (bool(origins) or name == "CORS_ALLOWED_ORIGINS")
+            and all(origin.startswith("https://") and "*" not in origin for origin in origins),
+            f"{name} must contain explicit HTTPS origins.",
+            108 if name == "CORS_ALLOWED_ORIGINS" else 109,
+        )
+    require(
+        settings.ONEID_ADAPTER == "disabled",
+        "ONEID_ADAPTER must be disabled until a real integration exists.",
+        110,
+    )
+    require(
+        settings.REFRESH_COOKIE["secure"],
+        "REFRESH_COOKIE_SECURE must be True in production.",
+        111,
+    )
+    return errors

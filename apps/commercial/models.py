@@ -220,10 +220,12 @@ def shipments_writable_by(user):
         return queryset
 
     party_ids = [m.party_id for m in memberships_of(user)]
-    return queryset.filter(
+    eligible = queryset.filter(
         Q(carrier_party_id__in=party_ids)
         | Q(export_contract__seller_party_id__in=party_ids)
-    ).distinct()
+    ).values("pk")
+    # Lock only the shipment row; nullable permission joins cannot be locked.
+    return queryset.filter(pk__in=eligible)
 
 
 def contracts_writable_by(user):

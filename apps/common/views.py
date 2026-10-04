@@ -1,34 +1,30 @@
-from django.db import connection
 from drf_spectacular.utils import extend_schema
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
+from apps.common.readiness import dependency_status
+
 
 @extend_schema(
-    summary="Liveness and database check",
-    responses={200: dict},
+    summary="Database and cache readiness",
+    responses={200: dict, 503: dict},
 )
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(request):
-    """Cheap check that the process is up and the database answers."""
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-        database = "ok"
-    except Exception as exc:  # pragma: no cover - surfaced verbatim to the caller
-        database = f"error: {exc}"
-
-    return Response(
+    """No success status until every dependency needed to serve traffic works."""
+    dependencies = dependency_status()
+    response = Response(
         {
             "service": "agro-zanjir-digital",
             "version": "0.1.0",
-            "database": database,
-            "engine": connection.vendor,
-        }
+            **dependencies,
+        },
+        status=200 if all(value == "ok" for value in dependencies.values()) else 503,
     )
+    response["Cache-Control"] = "no-store"
+    return response
 
 
 @extend_schema(
@@ -52,6 +48,6 @@ def index(request):
             "health": request.build_absolute_uri("/api/v1/health/"),
             "docs": request.build_absolute_uri("/api/docs/"),
             "schema": request.build_absolute_uri("/api/schema/"),
-            "admin": request.build_absolute_uri("/admin/"),
+            "admin": request.build_absolute_uri("/django-admin/"),
         }
     )

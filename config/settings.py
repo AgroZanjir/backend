@@ -17,7 +17,8 @@ env = environ.Env(
     ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
     CORS_ALLOWED_ORIGINS=(list, ["http://localhost:5173"]),
 )
-environ.Env.read_env(BASE_DIR / ".env")
+if env.bool("DJANGO_READ_DOT_ENV", default=True):
+    environ.Env.read_env(BASE_DIR / ".env")
 
 # 32+ bytes even in development: PyJWT warns below that, and a warning
 # nobody can act on is a warning everybody learns to ignore.
@@ -27,6 +28,9 @@ SECRET_KEY = env(
 )
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+# The unexposed container health probe uses localhost, independently of DNS.
+if "localhost" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("localhost")
 
 # --- applications -----------------------------------------------------------
 
@@ -118,6 +122,10 @@ DATABASES = {
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
     )
 }
+if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
+    DATABASES["default"].setdefault("OPTIONS", {})["connect_timeout"] = 3
+    DATABASES["default"]["CONN_MAX_AGE"] = 60
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 # Every rate limit in this project counts in here: the assistant's, the
 # contact form's, and the two on the sign-in doors. The default is this
@@ -131,6 +139,10 @@ CACHES = {
     if hasattr(env, "cache_url")
     else {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
 }
+if CACHES["default"]["BACKEND"] == "django.core.cache.backends.redis.RedisCache":
+    CACHES["default"].setdefault("OPTIONS", {}).update(
+        {"socket_connect_timeout": 2, "socket_timeout": 2}
+    )
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -151,7 +163,7 @@ DISPLAY_TIME_ZONE = "Asia/Tashkent"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -160,8 +172,8 @@ STORAGES = {
     },
 }
 
-MEDIA_URL = "media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = Path(env("MEDIA_ROOT", default=str(BASE_DIR / "media")))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -262,7 +274,7 @@ REFRESH_COOKIE = {
 # a persona to the demo user of the same name and says so in the response; the
 # sign-in screen shows that banner. Nothing else in the system knows which
 # adapter answered.
-ONEID_ADAPTER = env("ONEID_ADAPTER", default="stub")
+ONEID_ADAPTER = env("ONEID_ADAPTER", default="stub" if DEBUG else "disabled")
 
 # An assertion by whoever deployed this, read only by the deployment check in
 # apps/common/checks.py. It cannot verify that the passwords were rotated - it

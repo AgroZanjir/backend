@@ -38,7 +38,7 @@ urlpatterns = [
     path("", index, name="index"),
     # The admin is the manual adapter surface from figure 4 - it is a
     # deliverable here, not a developer convenience.
-    path("admin/", admin.site.urls),
+    path("django-admin/", admin.site.urls),
     path("api/v1/", include(api_v1)),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(

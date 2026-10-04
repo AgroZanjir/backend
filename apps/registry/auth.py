@@ -77,6 +77,9 @@ def resolve_identity(*, persona: str = "", pinfl: str = "", code: str = "") -> U
     """
     adapter = getattr(settings, "ONEID_ADAPTER", "stub")
 
+    if adapter == "disabled":
+        raise OneIDError("OneID sign-in is disabled. Sign in with a username and password.")
+
     if adapter != "stub":  # pragma: no cover - no live adapter is configured yet
         raise OneIDError(
             f"ONEID_ADAPTER={adapter!r} has no implementation; the stub is the only "

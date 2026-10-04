@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import TestCase
 
 
@@ -7,6 +9,23 @@ class HealthTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["database"], "ok")
+        self.assertEqual(response.json()["cache"], "ok")
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+    def test_database_failure_is_not_a_success_and_does_not_leak_details(self):
+        with patch("apps.common.readiness.connection.cursor", side_effect=RuntimeError("private-db-url")):
+            response = self.client.get("/api/v1/health/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["database"], "unavailable")
+        self.assertNotIn("private-db-url", response.content.decode())
+
+    def test_cache_failure_prevents_readiness(self):
+        with patch("apps.common.readiness.cache.set", side_effect=RuntimeError("private-cache-url")):
+            response = self.client.get("/api/v1/health/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["database"], "ok")
+        self.assertEqual(response.json()["cache"], "unavailable")
+        self.assertNotIn("private-cache-url", response.content.decode())
 
 
 class IndexTests(TestCase):
@@ -16,3 +35,10 @@ class IndexTests(TestCase):
         body = response.json()
         self.assertTrue(body["health"].endswith("/api/v1/health/"))
         self.assertTrue(body["docs"].endswith("/api/docs/"))
+        self.assertTrue(body["admin"].endswith("/django-admin/"))
+
+    def test_admin_uses_the_production_route(self):
+        response = self.client.get("/django-admin/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/django-admin/login/", response["Location"])
+        self.assertEqual(self.client.get("/admin/").status_code, 404)

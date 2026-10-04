@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Password generator alphabet is not a credential; exact literal and file only"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^abcdefghijkmnpqrstuvwxyz23456789$''']
+paths = ['''^apps/common/management/commands/seed_accounts\.py$''']

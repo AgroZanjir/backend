@@ -17,3 +17,6 @@ staticfiles/
 # Written by `manage.py spectacular`, not committed - the web client
 # generates its API types from the live schema.
 schema.yml
+.ruff_cache/
+.coverage*
+htmlcov/

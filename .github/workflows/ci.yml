@@ -1,0 +1,276 @@
+name: CI and production release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep publish -> infra deployment -> cleanup in one lifecycle lock, including reruns.
+# Different PRs still run independently; production runs are never cancelled mid-deploy.
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'prod' }}
+  queue: max
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  APP: backend
+  DOCKER_BUILD_SUMMARY: 'false'
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+
+jobs:
+  security-gitleaks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require main for manual production runs
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo '::error::Run production releases from main.'; exit 1
+          fi
+      - run: python3 ci/install_scanner.py gitleaks
+      - name: Scan complete Git history without printing secrets
+        run: gitleaks git --redact --no-banner --log-opts=--all .
+
+  security-semgrep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - run: python -m pip install --disable-pip-version-check semgrep==1.179.0
+      - name: Security analysis
+        run: semgrep scan --config p/ci --error --metrics=off --disable-version-check --exclude ci/tests .
+
+  security-trivy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 ci/install_scanner.py trivy
+      - name: Dependency and configuration vulnerabilities
+        run: trivy fs --include-dev-deps --scanners vuln,misconfig --severity HIGH,CRITICAL --exit-code 1 --timeout 10m --skip-dirs .git --skip-dirs .venv .
+
+  tests:
+    needs: [security-gitleaks, security-semgrep, security-trivy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-postgres-only
+          POSTGRES_DB: agrozanjir_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U ci -d agrozanjir_ci'
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd 'redis-cli ping'
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DJANGO_SETTINGS_MODULE: config.ci
+      DATABASE_URL: postgres://ci:ci-postgres-only@127.0.0.1:5432/agrozanjir_ci
+      CACHE_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.23'
+          python-version: '3.14'
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run --frozen python -m unittest discover -s ci/tests -v
+      - run: uv run --frozen python manage.py check
+      - run: uv run --frozen python manage.py makemigrations --check --dry-run
+      - name: Application tests (keep this job even when the suite is initially empty)
+        run: uv run --frozen python manage.py test --noinput
+
+  build-pr:
+    if: github.event_name == 'pull_request'
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: agrozanjir-pr:check
+          outputs: type=docker,dest=${{ runner.temp }}/image.tar
+          provenance: false
+          cache-from: type=gha,scope=${{ env.APP }}-pr
+          cache-to: type=gha,mode=max,scope=${{ env.APP }}-pr
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-image
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  build-publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: tests
+    runs-on: ubuntu-24.04
+    environment: prod
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Immutable release tag
+        id: tag
+        run: |
+          tag="ghcr.io/${GITHUB_REPOSITORY,,}:${APP}-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=min
+          sbom: true
+          cache-from: type=gha,scope=${{ env.APP }}-prod
+          cache-to: type=gha,mode=max,scope=${{ env.APP }}-prod
+      - name: Pin the published manifest digest
+        id: reference
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "image=${TAG}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  image-scan:
+    if: always() && (needs.build-pr.result == 'success' || needs.build-publish.result == 'success')
+    needs: [build-pr, build-publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 ci/install_scanner.py trivy
+      - if: github.event_name == 'pull_request'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-image
+          path: ${{ runner.temp }}
+      - name: Scan PR image without registry credentials
+        if: github.event_name == 'pull_request'
+        run: trivy image --input "$RUNNER_TEMP/image.tar" --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 --timeout 10m
+      - name: Scan the exact published digest
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ needs.build-publish.outputs.image }}
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: trivy image --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 --timeout 10m "$IMAGE"
+
+  deploy:
+    if: always() && github.event_name != 'pull_request' && needs.image-scan.result == 'success' && needs.build-publish.result == 'success'
+    needs: [build-publish, image-scan]
+    runs-on: ubuntu-24.04
+    environment: prod
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ vars.INFRA_APP_ID }}
+          private-key: ${{ secrets.INFRA_APP_PRIVATE_KEY }}
+          owner: AgroZanjir
+          repositories: infra
+          permission-contents: write
+          permission-actions: read
+      - name: Update only this app's infra reference and await deployment
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INFRA_REPOSITORY: ${{ vars.INFRA_REPOSITORY || 'AgroZanjir/infra' }}
+          IMAGE: ${{ needs.build-publish.outputs.image }}
+        run: python3 ci/release.py --app "$APP" --image "$IMAGE" --receipt deployment-receipt.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-deployment-receipt
+          path: deployment-receipt.json
+          retention-days: 30
+          if-no-files-found: error
+
+  cleanup-ghcr:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    environment: prod
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-deployment-receipt
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ vars.INFRA_APP_ID }}
+          private-key: ${{ secrets.INFRA_APP_PRIVATE_KEY }}
+          owner: AgroZanjir
+          repositories: infra
+          permission-contents: read
+      - name: Retain this release and the previous successful release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INFRA_REPOSITORY: ${{ vars.INFRA_REPOSITORY || 'AgroZanjir/infra' }}
+        run: python3 ci/cleanup.py --app "$APP" --receipt deployment-receipt.json

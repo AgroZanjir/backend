@@ -7,12 +7,13 @@ legible to banks, insurers, carriers and customs.
 ## Run it
 
 ```sh
+uv sync --locked               # uv 0.12.23, Python 3.14
 cp .env.example .env            # optional; the shell boots without one
-.venv/bin/python manage.py migrate
-.venv/bin/python manage.py seed_reference     # capabilities, roles, org types, checks
-.venv/bin/python manage.py seed_demo          # the pilot demonstration dataset
-.venv/bin/python manage.py seed_accounts      # the people, and their passwords
-.venv/bin/python manage.py runserver 8000
+uv run manage.py migrate
+uv run manage.py seed_reference     # capabilities, roles, org types, checks
+uv run manage.py seed_demo          # local demonstration dataset only
+uv run manage.py seed_accounts      # local pilot accounts; prints passwords
+uv run manage.py runserver 8000
 ```
 
 `seed_accounts` creates the pilot's people - three to six roles at each kind of
@@ -27,16 +28,24 @@ panels were designed against; `--reset` replaces it.
 
 | URL | What it is |
 | --- | --- |
-| `/api/v1/health/` | liveness + database check (open, no auth) |
+| `/api/v1/health/` | database + cache readiness; 503 when either fails (open, no auth) |
 | `/api/docs/` | Swagger UI over the generated OpenAPI schema |
 | `/api/schema/` | the schema itself — the web client generates its API layer from this |
-| `/admin/` | the operator admin, which is also the manual-adapter surface |
+| `/django-admin/` | the operator admin, which is also the manual-adapter surface |
 | `/api/v1/assistant/` | whether the website's assistant is connected (open, no auth) |
 
 ```sh
-.venv/bin/python manage.py test          # 87 tests
-.venv/bin/python manage.py spectacular --file schema.yml   # dump the spec
+uv run --locked manage.py test --settings=config.ci
+uv run --locked ruff check .
+uv run --locked manage.py makemigrations --check --dry-run --settings=config.ci
+uv run --locked manage.py spectacular --file schema.yml --settings=config.ci
 ```
+
+`pyproject.toml` declares runtime dependencies and a separate `dev` group;
+`uv.lock` fixes the full dependency graph. CI supplies disposable PostgreSQL 18
+and Redis URLs to `config.ci`. With neither URL set, local tests use in-memory
+SQLite/cache; they do not read `.env`. Production dependencies alone are installed
+with `uv sync --locked --no-dev`.
 
 ## The model
 
@@ -264,7 +273,7 @@ through them today.
 
 ## Database
 
-PostgreSQL 16 is the target — JSONB for per-product QC specs and event
+PostgreSQL 18 is the production target — JSONB for per-product QC specs and event
 payloads, row-level security for party-scoped access, real transactions for
 anything touching money or liens. Set `DATABASE_URL` to point at it. With that
 unset the shell falls back to SQLite so it runs before a database has been
@@ -277,52 +286,86 @@ first.
 
 ## Deployment
 
-The backend serves the API and its own static files; the web client is a static
-bundle that any web server can host. Nothing here needs a container to run.
+This repository tests, builds and publishes its immutable image, scans it, then
+updates the backend release file in [infra](https://github.com/AgroZanjir/infra).
+Only infra connects to the server. Runtime secrets and variables live in infra's
+GitHub `prod` environment; this repository's `prod` environment holds only its
+release permissions. Follow the infra README for bootstrap, the first deployment,
+backups and rollback.
 
-The nginx config, the systemd unit and the two deployment scripts live in the
-[infra repository](https://github.com/AgroZanjir/infra); what follows is the
-sequence they automate.
+The multi-stage `Dockerfile` uses Python 3.14 and uv 0.12.23, with base images pinned
+by digest. uv installs only locked runtime dependencies. `collectstatic` runs
+once during build with isolated `config.build` settings, so Django admin assets
+are already in the image and require no production secrets. WhiteNoise serves
+`/static/`; the runtime contains no uv, development dependencies or credentials.
 
-```sh
-# 1. the API
-cp .env.example .env                      # then set the deployment block
-#    DEBUG=False, a real DJANGO_SECRET_KEY, ALLOWED_HOSTS, DATABASE_URL,
-#    CORS_ALLOWED_ORIGINS and CSRF_TRUSTED_ORIGINS
-.venv/bin/python manage.py check --deploy # must be clean before anything else
-.venv/bin/python manage.py migrate
-.venv/bin/python manage.py collectstatic --noinput
-.venv/bin/python manage.py seed_reference
-.venv/bin/python manage.py seed_demo      # pilot dataset; skip for a real one
-.venv/bin/python manage.py seed_accounts  # prints the passwords once
-.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3
+The process runs as UID/GID 10001 on port 8000 with root-owned application code.
+Compose mounts writable `/app/media` and `/tmp`, keeps the root filesystem read-only,
+and exposes only the reverse proxy. Never publish backend port 8000 directly:
+Django trusts the proxy's forwarded HTTPS header and client address.
 
-# 2. the web client, from the frontend repository
-git clone https://github.com/AgroZanjir/frontend.git && cd frontend
-VITE_API_BASE_URL=https://api.agrozanjir.uz npm run build   # -> dist/
-```
+`entrypoint.sh` validates configuration, waits up to 60 seconds for PostgreSQL
+and Redis, runs strict deployment checks, migrates, checks again, then replaces
+itself with Gunicorn. Defaults are two `gthread` workers, four threads per worker,
+a 120-second timeout and a 30-second graceful timeout. Set `GUNICORN_WORKERS`,
+`GUNICORN_THREADS`, `GUNICORN_TIMEOUT`, `GUNICORN_GRACEFUL_TIMEOUT` and
+`STARTUP_TIMEOUT` to positive integers in infra to tune them. Proxy streaming
+must remain enabled for the assistant's server-sent events.
 
-`dist/` is served as static files, with **every unknown path rewritten to
-`index.html`** - it is a single-page app, and a reader who reloads on
-`/showroom/melon` gets a 404 from the web server otherwise.
-
-Four things that are easy to get wrong, and what each looks like when it is:
-
-| Setting | Wrong looks like |
+| Runtime setting | Production value |
 | --- | --- |
-| `VITE_API_BASE_URL` | Vite inlines it at **build** time; changing the API's address means building again |
-| `CORS_ALLOWED_ORIGINS` | every request fails in the browser and succeeds in `curl` |
-| `CSRF_TRUSTED_ORIGINS` | reads work, writes come back 403 |
-| `REFRESH_COOKIE_SAMESITE` | signing in works, reloading the page signs you out - the cookie is `Lax` and the two hosts are not the same site |
+| `DJANGO_SECRET_KEY` | Unique random secret, at least 50 characters |
+| `DATABASE_URL` | PostgreSQL 18 connection URL with a percent-encoded password |
+| `CACHE_URL` | Private shared Redis connection URL |
+| `DEBUG` | `False` |
+| `ALLOWED_HOSTS` | Explicit public hostname; localhost is added for the internal health probe |
+| `CORS_ALLOWED_ORIGINS` | Empty for the same-origin deployment; otherwise explicit HTTPS origins |
+| `CSRF_TRUSTED_ORIGINS` | `https://agrozanjir.uz` |
+| `ONEID_ADAPTER` | `disabled`; username/password sign-in remains available |
+| `MEDIA_ROOT` | `/app/media` (default in the image) |
+| `ANTHROPIC_API_KEY` | Optional; without it the assistant reports unavailable |
 
-With `DEBUG=False` the security settings switch on by themselves: TLS redirect,
-HSTS, secure cookies, `X-Frame-Options: DENY`, and the proxy header Django
-needs to know a request arrived over HTTPS. `manage.py check --deploy` is the
-gate - it must report no issues.
+The health endpoint returns HTTP 503 when the database or Redis round-trip fails
+and never returns raw connection exceptions. Docker checks the HTTP endpoint with
+the internal `localhost` host and forwarded HTTPS header. A healthy process has
+completed migrations before accepting requests.
 
-**PostgreSQL, not SQLite.** Set `DATABASE_URL`. The fallback exists so the
-shell boots before a database is provisioned; two tables are written on every
-lot movement and SQLite locks the file for each one.
+After the first deployment, run `python manage.py seed_reference` and interactive
+`python manage.py createsuperuser` through the infra maintenance instructions.
+Neither runs automatically. **Do not run `seed_demo` or `seed_accounts` on a fresh
+production database.** Existing pilot accounts with usable passwords block
+deployment unless an operator actually rotates/verifies their passwords and sets
+`SEEDED_PASSWORDS_ROTATED=True`. Empty databases and normal new administrators
+need no such assertion. The `/django-admin/` route replaces `/admin/`.
+
+Uploaded media retains the current public-link behavior: anyone possessing a
+`/media/...` URL can download that file without signing in. The random filename
+is not authorization. Do not upload sensitive documents under this policy;
+authenticated download URLs need a separate application change. Persist and back
+up both the PostgreSQL data and media volume.
+
+Schema migrations must remain compatible with the preceding application image.
+Rolling back an image does not undo migrations; destructive changes require a
+tested database restore or a separate staged migration.
+
+## CI and releases
+
+`.github/workflows/ci.yml` runs Gitleaks, Semgrep and Trivy source gates, application
+tests, a locked multi-stage image build, Trivy image scan, infra update/deployment
+wait, then GHCR cleanup. PRs build/scan without publishing. Main releases publish
+`ghcr.io/agrozanjir/backend:backend-<full-sha>-<run-id>-<attempt>` and deploy by digest.
+
+Create a `prod` environment with variable `INFRA_APP_ID` and secret
+`INFRA_APP_PRIVATE_KEY`. Runtime/server secrets belong only to infra/prod. The App
+is installed on infra with Contents write and Actions read. The app's deploy job
+only updates `apps/backend/image.env` in infra and verifies its successful receipt;
+it never connects to the server. Cleanup preserves that release and the preceding
+successful release, including platform/attestation manifests, and skips stale reruns.
+See [infra setup and operations](https://github.com/AgroZanjir/infra/blob/main/README.md)
+for package access, environments, bootstrap, rollback and backup instructions.
+uv waits seven days before resolving newly published packages; reviewed locked
+versions keep builds repeatable. `.gitleaks.toml` retains all default rules and
+excludes only the fixed password-generator character alphabet in its one source file.
 
 ## Not built yet
 
@@ -344,4 +387,4 @@ This is one of three. They are deployed together and versioned apart:
 | --- | --- |
 | [AgroZanjir/backend](https://github.com/AgroZanjir/backend) | Django 6 + DRF: the lot registry, the event log, the six clusters and the ports |
 | [AgroZanjir/frontend](https://github.com/AgroZanjir/frontend) | Vite + React: the public website and the eight operator panels |
-| [AgroZanjir/infra](https://github.com/AgroZanjir/infra) | How the two are served: nginx, gunicorn, PostgreSQL, the deployment sequence |
+| [AgroZanjir/infra](https://github.com/AgroZanjir/infra) | Compose, Caddy HTTPS/HTTP3, PostgreSQL 18, Redis, bootstrap and deployment |

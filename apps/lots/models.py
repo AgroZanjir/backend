@@ -378,14 +378,17 @@ def lots_writable_by(user):
         return queryset
 
     party_ids = [m.party_id for m in memberships_of(user)]
-    return queryset.filter(
+    eligible = queryset.filter(
         Q(owner_party_id__in=party_ids)
         | Q(custody_party_id__in=party_ids)
         | Q(
             placements__removed_at__isnull=True,
             placements__zone__facility__operator_party_id__in=party_ids,
         )
-    ).distinct()
+    ).values("pk")
+    # Keep permission joins inside a subquery. The outer lot query must be
+    # lockable: PostgreSQL refuses SELECT DISTINCT ... FOR UPDATE.
+    return queryset.filter(pk__in=eligible)
 
 
 def zones_writable_by(user):

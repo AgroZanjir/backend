@@ -269,7 +269,7 @@ def request_lab_report(request):
     # The same five routes their screens use: a sample is sent for a lot they
     # are actually handling.
     lot = (
-        visible_lots(request.user)
+        Lot.objects.filter(pk__in=visible_lots(request.user).values("pk"))
         .select_for_update()
         .filter(code=data["lot"])
         .first()
