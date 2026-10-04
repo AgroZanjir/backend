@@ -231,7 +231,7 @@ jobs:
           owner: AgroZanjir
           repositories: infra
           permission-contents: write
-          permission-actions: read
+          permission-actions: write
       - name: Update only this app's infra reference and await deployment
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

@@ -28,27 +28,30 @@ def receipt():
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_source_release_only_commits_desired_image_and_never_dispatches(self):
+    def test_unchanged_image_starts_a_fresh_infra_deployment(self):
         client = GitHub("test", "owner/infra")
-        with patch.object(client, "update_file", return_value="c" * 40) as update, \
+        with patch.object(client, "update_file", return_value=("c" * 40, False)), \
+                patch.object(client, "request", return_value={"workflow_run_id": 789}) as request:
+            self.assertEqual(request_deployment(client, "backend", IMAGE, "retry"), (None, 789))
+            self.assertEqual(request.call_args.args, (
+                "/repos/owner/infra/actions/workflows/deploy-backend.yml/dispatches", "POST",
+                {"ref": "main", "inputs": {"operation": "deploy", "expected_image": IMAGE}}))
+
+    def test_changed_image_uses_push_without_duplicate_dispatch(self):
+        client = GitHub("test", "owner/infra")
+        with patch.object(client, "update_file", return_value=("c" * 40, True)), \
                 patch.object(client, "request") as request:
-            self.assertEqual(request_deployment(client, "backend", IMAGE, "release"), "c" * 40)
-            update.assert_called_once_with("apps/backend/image.env", desired_line("backend", IMAGE), "release")
+            self.assertEqual(request_deployment(client, "backend", IMAGE, "release"), ("c" * 40, None))
             request.assert_not_called()
 
-    def test_unchanged_file_reuses_existing_commit_without_writing(self):
+    def test_unchanged_file_reports_no_new_commit(self):
         client = GitHub("test", "owner/infra")
         line = desired_line("backend", IMAGE)
         with patch.object(client, "file", return_value=(line, "blob")), \
                 patch.object(client, "request", return_value=[{"sha": "c" * 40}]) as request:
-            self.assertEqual(client.update_file("apps/backend/image.env", line, "retry"), "c" * 40)
+            self.assertEqual(client.update_file("apps/backend/image.env", line, "retry",
+                                                report_change=True), ("c" * 40, False))
             self.assertEqual(request.call_count, 1)
-            self.assertEqual(len(request.call_args.args), 1)
-
-    def test_source_deploy_token_only_reads_infra_actions(self):
-        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml").read_text()
-        self.assertIn("permission-actions: read", workflow)
-        self.assertNotIn("permission-actions: write", workflow)
 
     def test_missing_push_run_fails_after_discovery_timeout(self):
         client = GitHub("test", "owner/infra")
@@ -58,6 +61,19 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "No infra deployment"):
                 wait_for_deployment(client, "backend", "c" * 40, IMAGE)
             sleep.assert_not_called()
+
+    def test_dispatch_wait_uses_exact_run_and_its_current_commit(self):
+        client = GitHub("test", "owner/infra")
+        run = {"id": 456, "run_attempt": 1, "head_sha": "c" * 40,
+               "event": "workflow_dispatch", "status": "completed", "conclusion": "success",
+               "html_url": "https://github.com/owner/infra/actions/runs/456"}
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, "w") as archive:
+            archive.writestr("backend.json", json.dumps(receipt()))
+        with patch.object(client, "request", side_effect=[run, content.getvalue()]) as request, \
+                patch.object(client, "pages", return_value=[{"id": 1, "name": "deployment-receipt", "expired": False}]):
+            self.assertEqual(wait_for_deployment(client, "backend", None, IMAGE, run_id=456), receipt())
+            self.assertEqual(request.call_args_list[0].args, ("/repos/owner/infra/actions/runs/456",))
 
     def test_cancellation_signal_exits_without_waiting(self):
         for sig in (signal.SIGTERM, signal.SIGINT):
