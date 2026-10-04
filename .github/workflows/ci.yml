@@ -185,7 +185,7 @@ jobs:
         run: echo "image=${TAG}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
   image-scan:
-    if: always() && (needs.build-pr.result == 'success' || needs.build-publish.result == 'success')
+    if: ${{ !cancelled() && (needs.build-pr.result == 'success' || needs.build-publish.result == 'success') }}
     needs: [build-pr, build-publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -214,7 +214,7 @@ jobs:
         run: trivy image --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 --timeout 10m "$IMAGE"
 
   deploy:
-    if: always() && github.event_name != 'pull_request' && needs.image-scan.result == 'success' && needs.build-publish.result == 'success'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.image-scan.result == 'success' && needs.build-publish.result == 'success' }}
     needs: [build-publish, image-scan]
     runs-on: ubuntu-24.04
     environment: prod
@@ -231,7 +231,7 @@ jobs:
           owner: AgroZanjir
           repositories: infra
           permission-contents: write
-          permission-actions: read
+          permission-actions: write
       - name: Update only this app's infra reference and await deployment
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
