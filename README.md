@@ -357,9 +357,10 @@ wait, then GHCR cleanup. PRs build/scan without publishing. Main releases publis
 
 Create a `prod` environment with variable `INFRA_APP_ID` and secret
 `INFRA_APP_PRIVATE_KEY`. Runtime/server secrets belong only to infra/prod. The App
-is installed on infra with Contents write and Actions write. The app's deploy job
+is installed on infra with Contents write and Actions read. The app's deploy job
 updates `apps/backend/image.env` in infra and verifies its successful receipt.
-An unchanged-image retry dispatches a fresh infra deployment from main without rebuilding.
+If infra deployment fails, rerun it in infra, then rerun this source deploy job
+to verify its receipt. Source repos never dispatch infra workflows.
 The app repository never connects to the server. Cleanup preserves that release and the preceding
 successful release, including platform/attestation manifests, and skips stale reruns.
 See [infra setup and operations](https://github.com/AgroZanjir/infra/blob/main/README.md)

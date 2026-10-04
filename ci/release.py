@@ -12,24 +12,15 @@ import zipfile
 from github_api import GitHub, desired_line, image_parts, validate_receipt
 
 
-def wait_for_deployment(client, app, commit, image, timeout=2700, run_id=None):
+def wait_for_deployment(client, app, commit, image, timeout=2700):
     deadline = time.monotonic() + timeout
     discovery_deadline = time.monotonic() + min(timeout, 120)
     query = urllib.parse.urlencode({"head_sha": commit, "event": "push", "per_page": 100})
     path = client.base + f"/actions/workflows/deploy-{app}.yml/runs?" + query
     last_status = None
     while time.monotonic() < deadline:
-        if run_id is not None:
-            run = client.request(client.base + f"/actions/runs/{run_id}")
-            if str(run["id"]) != str(run_id) or run["event"] != "workflow_dispatch":
-                raise ValueError("Unexpected dispatched infra workflow identity")
-            commit = run["head_sha"] if commit is None else commit
-            if run["head_sha"] != commit:
-                raise ValueError("Dispatched infra workflow commit changed")
-            runs = [run]
-        else:
-            runs = client.request(path)["workflow_runs"]
-            runs = [run for run in runs if run["head_sha"] == commit and run["event"] == "push"]
+        runs = client.request(path)["workflow_runs"]
+        runs = [run for run in runs if run["head_sha"] == commit and run["event"] == "push"]
         if runs:
             run = max(runs, key=lambda item: (item["id"], item.get("run_attempt", 1)))
             status = (run["id"], run["status"], run.get("conclusion"))
@@ -38,7 +29,7 @@ def wait_for_deployment(client, app, commit, image, timeout=2700, run_id=None):
                 last_status = status
             if run["status"] == "completed":
                 if run["conclusion"] != "success":
-                    raise RuntimeError("Infra deployment did not succeed; image cleanup is disabled")
+                    raise RuntimeError("Infra deployment did not succeed; retry the failed deployment in infra, then rerun this source job. Image cleanup is disabled")
                 artifacts = client.pages(client.base + f"/actions/runs/{run['id']}/artifacts", "artifacts")
                 matches = [a for a in artifacts if a["name"] == "deployment-receipt" and not a["expired"]]
                 if len(matches) != 1:
@@ -64,17 +55,9 @@ def stop_on_signal(signum, _frame):
 
 
 def request_deployment(client, app, image, message):
-    commit, changed = client.update_file(f"apps/{app}/image.env", desired_line(app, image),
-                                       message, report_change=True)
-    if changed:
-        print(f"Updated {client.repository} at {commit}; awaiting push deployment", flush=True)
-        return commit, None
-    print("Desired image is unchanged; starting a fresh deployment from infra main", flush=True)
-    result = client.request(client.base + f"/actions/workflows/deploy-{app}.yml/dispatches",
-                            "POST", {"ref": "main", "inputs": {"operation": "deploy", "expected_image": image}})
-    if not isinstance(result, dict) or not str(result.get("workflow_run_id", "")).isdigit():
-        raise RuntimeError("GitHub did not return the dispatched deployment run ID")
-    return None, result["workflow_run_id"]
+    commit = client.update_file(f"apps/{app}/image.env", desired_line(app, image), message)
+    print(f"Desired image recorded in {client.repository} at {commit}; observing infra deployment", flush=True)
+    return commit
 
 
 def main():
@@ -89,9 +72,9 @@ def main():
     if sha != os.environ["GITHUB_SHA"] or run != os.environ["GITHUB_RUN_ID"]:
         raise ValueError("Image is not from this source commit and workflow run")
     client = GitHub(os.environ["GH_TOKEN"], os.environ.get("INFRA_REPOSITORY", "AgroZanjir/infra"))
-    commit, infra_run = request_deployment(client, args.app, args.image,
+    commit = request_deployment(client, args.app, args.image,
                                           f"deploy({args.app}): {sha} [run {run}]")
-    receipt = wait_for_deployment(client, args.app, commit, args.image, run_id=infra_run)
+    receipt = wait_for_deployment(client, args.app, commit, args.image)
     Path(args.receipt).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
